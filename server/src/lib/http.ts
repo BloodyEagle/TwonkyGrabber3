@@ -178,10 +178,14 @@ export const nodeTransport: HttpTransport = {
             const req = mod.request(parsed, reqOptions, (res) => {
                 armIdleTimer();
                 // Резолвим по заголовкам: статус решает, дописывать или начинать с нуля.
-                resolve({status: res.statusCode ?? 0, headers: res.headers, stream: res});
+                // Важно: подписка на 'data' здесь включает flowing mode, поэтому сразу
+                // ставим поток на паузу — потребитель обязан вызвать resume() после
+                // подписки. Иначе тело ответа теряется до подключения слушателя.
                 res.on('data', () => {
                     armIdleTimer();
                 });
+                res.pause();
+                resolve({status: res.statusCode ?? 0, headers: res.headers, stream: res});
                 res.on('end', () => {
                     if (timer !== undefined) clearTimeout(timer);
                 });

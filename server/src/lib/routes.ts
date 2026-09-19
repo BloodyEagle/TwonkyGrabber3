@@ -17,9 +17,14 @@ import {
     SSE_HEARTBEAT_MS,
     SSE_QUEUE_MS,
     SSE_SCAN_MS,
+    PROBE_TIMEOUT,
+    THUMB_CACHE_MAX_AGE,
+    THUMB_MAX,
+    THUMB_MIN,
 } from '../config';
 import { checkAvailable } from './probe';
-import { fileUrl, parseConnectionUrl } from './url-parser';
+import { nodeTransport } from './http';
+import { fileUrl, parseConnectionUrl, thumbUrl } from './url-parser';
 import type { Scanner } from './scanner';
 import type { Downloader } from './downloader';
 import type { FoundFile } from './types';
@@ -203,6 +208,83 @@ export function createApiRouter(deps: ApiDeps): Router {
     });
 
     // --- Очередь скачивания (план, п.8) ---
+
+    /**
+     * Отдать картинку по URL апстрима; false — ответ непригоден (не 200 / не image),
+     * вызывающий решает: fallback на оригинал или 404. Сетевая ошибка — исключение.
+     */
+    const sendUpstreamImage = async (url: string, res: Response): Promise<boolean> => {
+        const upstream = await nodeTransport.stream(url, { headers: {}, idleTimeoutMs: PROBE_TIMEOUT });
+        const contentType = String(upstream.headers['content-type'] ?? '');
+        if (upstream.status !== 200 || !contentType.startsWith('image/')) {
+            upstream.stream.destroy();
+            return false;
+        }
+        res.status(200);
+        res.set('Content-Type', contentType);
+        const length = upstream.headers['content-length'];
+        if (length !== undefined) res.set('Content-Length', String(length));
+        res.set('Cache-Control', `public, max-age=${THUMB_CACHE_MAX_AGE}`);
+        // Обрыв клиента → уничтожаем запрос к апстриму (план, п.7).
+        res.on('close', () => {
+            upstream.stream.destroy();
+        });
+        upstream.stream.pipe(res);
+        upstream.stream.resume();
+        return true;
+    };
+
+    router.get('/thumb', (req, res) => {
+        const n = Number.parseInt(String(queryToString(req.query.n) ?? ''), 10);
+        if (!Number.isInteger(n) || n < 0) {
+            res.status(400).json({ ok: false, reason: 'Параметр n обязателен (целое число)' });
+            return;
+        }
+        const conn = scanner.getConnection();
+        if (conn === null) {
+            res.status(409).json({ ok: false, reason: 'Сначала подключитесь к серверу' });
+            return;
+        }
+        const orig = queryToString(req.query.orig) === '1';
+
+        const failNeterr = (err: unknown): void => {
+            res.status(502).json({
+                ok: false,
+                reason: `Сервер недоступен: ${err instanceof Error ? err.message : String(err)}`,
+            });
+        };
+
+        if (orig) {
+            // Принудительно оригинал; не-картинка (видео) → 404 и заглушка на фронте.
+            void sendUpstreamImage(fileUrl(conn, n), res)
+                .then((sent) => {
+                    if (!sent) res.status(404).end();
+                })
+                .catch(failNeterr);
+            return;
+        }
+
+        const w = Number.parseInt(String(queryToString(req.query.w) ?? ''), 10);
+        const h = Number.parseInt(String(queryToString(req.query.h) ?? ''), 10);
+        if (!Number.isFinite(w) || !Number.isFinite(h)) {
+            res.status(400).json({ ok: false, reason: 'Параметры w и h обязательны' });
+            return;
+        }
+        const clamp = (v: number): number => Math.min(THUMB_MAX, Math.max(THUMB_MIN, Math.round(v)));
+
+        void (async () => {
+            try {
+                const scaled = await sendUpstreamImage(thumbUrl(conn, n, clamp(w), clamp(h)), res);
+                if (scaled) return;
+                // Превью нет: fallback на оригинал, но только если это картинка.
+                const original = await sendUpstreamImage(fileUrl(conn, n), res);
+                if (!original) res.status(404).end();
+            } catch (err: unknown) {
+                failNeterr(err);
+            }
+        })();
+    });
+
 
     router.post('/queue', (req, res) => {
         const raw = req.body?.numbers;

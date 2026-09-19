@@ -567,6 +567,8 @@ export class Downloader {
             });
             res.stream.on('error', fail);
             (ws as NodeJS.EventEmitter).on('error', fail);
+            // Транспорт отдаёт поток на паузе — возобновляем после подписки.
+            (res.stream as NodeJS.ReadableStream & { resume(): void }).resume();
         });
     }
 }
