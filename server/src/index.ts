@@ -1,20 +1,43 @@
 /**
  * Точка входа сервера Twonky Grabber.
- * M0: каркас Express + /api/health. Сканер, очередь и превью-прокси подключаются на следующих шагах.
+ * Собирает зависимости (сканер + реальный пробер), подключает API-роутер.
  */
 import express from 'express';
-import {PORT} from './config';
+import { PORT } from './config';
+import { probeUrl } from './lib/probe';
+import { fileUrl } from './lib/url-parser';
+import { Scanner } from './lib/scanner';
+import type { Prober } from './lib/scanner';
+import { createApiRouter } from './lib/routes';
+
+// Пробер строит URL от текущего подключения сканера (связывание после создания,
+// чтобы избежать циклической ссылки в инициализаторе).
+let scannerRef: Scanner | null = null;
+
+const nodeProber: Prober = {
+    probe: (number) => {
+        const conn = scannerRef?.getConnection() ?? null;
+        if (conn === null) {
+            return Promise.resolve({
+                kind: 'neterr' as const,
+                media: null,
+                contentType: null,
+                size: null,
+                detail: 'нет подключения',
+            });
+        }
+        return probeUrl(fileUrl(conn, number));
+    },
+};
+
+const scanner = new Scanner(nodeProber);
+scannerRef = scanner;
 
 const app = express();
-
 app.use(express.json());
-
-// Проверка живости (M0-контракт).
-app.get('/api/health', (_req, res) => {
-    res.json({ok: true});
-});
+app.use('/api', createApiRouter({ scanner }));
 
 app.listen(PORT, () => {
-    // Тексты логов — на русском, чтобы совпадали с языком проекта.
+    // Тексты логов — на русском, чтобы совпадать с языком проекта.
     console.log(`[server] Twonky Grabber API запущен: http://localhost:${PORT}`);
 });

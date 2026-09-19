@@ -1,0 +1,581 @@
+/**
+ * Сканер Twonky (план, п.5).
+ *
+ * Жизненный цикл: start() → разведка (detect) → руки (arms) → done.
+ * Руки делят общий семафор PROBE_CONCURRENCY; глобальный visited-сет исключает
+ * повторные пробы и дубли находок. Фазы руки: scan | gapfill | sparse.
+ *
+ * Зависимость Prober внедряется — в юнит-тестах подставляется мок (сеть запрещена).
+ */
+import {
+    DETECT_BLOCK,
+    DENSE_SWEEP_EVERY,
+    EPS_WINDOW_MS,
+    JUMP_POSITIONS,
+    JUMP_REPEATS,
+    MAX_NUMBER,
+    MISS_LIMIT,
+    NETERR_PAUSE,
+    PROBE_BATCH,
+    PROBE_CONCURRENCY,
+    SEQ_THRESHOLD,
+    SPARSE_MAX,
+    SPARSE_MIN,
+    SPARSE_PROBES,
+    STEP_DELTA,
+} from '../config';
+import { buildFileName } from './mime';
+import { fileUrl } from './url-parser';
+import type { Arm, ArmDir, FoundFile, ScanMode, ScanProgress, ScanStatus, TwonkyConnection } from './types';
+import type { ProbeResult } from './probe';
+
+/** Пробер по номеру файла (интерфейс для моков в тестах). */
+export interface Prober {
+    probe(number: number): Promise<ProbeResult>;
+}
+
+/** Персистентное состояние сканера (план, п.5.10). */
+export interface PersistedScanState {
+    connection: TwonkyConnection;
+    status: ScanStatus;
+    mode: ScanMode;
+    probed: number;
+    arms: Arm[];
+    found: FoundFile[];
+}
+
+/** Позиция, запланированная на пробу в батче. */
+interface BatchItem {
+    number: number;
+    /** Проба из очереди плотного прохода — не влияет на missStreak. */
+    fromSweep: boolean;
+    arm: Arm;
+}
+
+/** Семафор с ограничением параллельности. */
+class Semaphore {
+    private active = 0;
+    private readonly queue: Array<() => void> = [];
+
+    constructor(private readonly limit: number) {}
+
+    async run<T>(task: () => Promise<T>): Promise<T> {
+        if (this.active >= this.limit) {
+            await new Promise<void>((resolve) => this.queue.push(resolve));
+        }
+        this.active += 1;
+        try {
+            return await task();
+        } finally {
+            this.active -= 1;
+            const next = this.queue.shift();
+            if (next !== undefined) next();
+        }
+    }
+}
+
+/** Шаг разреженного поиска: случайный из [SPARSE_MIN..SPARSE_MAX], в delta — кратный шагу. */
+function sparseStep(step: number): number {
+    const raw = SPARSE_MIN + Math.floor(Math.random() * (SPARSE_MAX - SPARSE_MIN + 1));
+    if (step <= 1) return raw;
+    const rounded = Math.round(raw / step) * step;
+    return Math.max(step, rounded);
+}
+
+function outOfRange(n: number): boolean {
+    return n < 0 || n > MAX_NUMBER;
+}
+
+/** Чтение состояния руки через функцию снимает ложное сужение типа в цикле runArm. */
+function isStopped(arm: Arm): boolean {
+    return arm.state === 'stopped';
+}
+
+/**
+ * Сканер: управляет разведкой, руками и находками.
+ * Все публичные методы безопасны для вызова из Express-обработчиков.
+ */
+export class Scanner {
+    private connection: TwonkyConnection | null = null;
+    private status: ScanStatus = 'idle';
+    private reason: string | null = null;
+    private mode: ScanMode = null;
+    private probed = 0;
+    private arms: Arm[] = [];
+    private readonly visited = new Set<number>();
+    private readonly foundMap = new Map<number, FoundFile>();
+    private neterrStreak = 0;
+    /** Инкрементируется в reset — живые циклы рук/разведки прерываются. */
+    private generation = 0;
+    private pausedFlag = false;
+    private resumeWaiters: Array<() => void> = [];
+    private foundSink: ((files: FoundFile[]) => void) | null = null;
+    private probeTimestamps: number[] = [];
+    private readonly sem = new Semaphore(PROBE_CONCURRENCY);
+
+    constructor(private readonly prober: Prober) {}
+
+    /** Приёмник находок (SSE-хаб буферизует и рассылает батчами). */
+    setOnFound(sink: (files: FoundFile[]) => void): void {
+        this.foundSink = sink;
+    }
+
+    getConnection(): TwonkyConnection | null {
+        return this.connection;
+    }
+
+    /** Установить/заменить подключение без запуска скана (после /api/connect). */
+    setConnection(connection: TwonkyConnection | null): void {
+        this.connection = connection;
+    }
+
+    /** Текущий прогресс для фронта. */
+    progress(): ScanProgress {
+        return {
+            status: this.status,
+            reason: this.reason,
+            mode: this.mode,
+            probed: this.probed,
+            found: this.foundMap.size,
+            eps: this.eps(),
+            arms: this.arms.map((a) => ({ dir: a.dir, pos: a.pos, phase: a.phase, state: a.state })),
+        };
+    }
+
+    /** Найденные файлы, отсортированные по номеру. */
+    foundList(): FoundFile[] {
+        return [...this.foundMap.values()].sort((a, b) => a.number - b.number);
+    }
+
+    /** Запуск скана; при paused — возобновление. */
+    start(connection: TwonkyConnection): void {
+        if (this.status === 'detecting' || this.status === 'scanning') return;
+        if (this.status === 'paused') {
+            this.resume();
+            return;
+        }
+        this.connection = connection;
+        this.beginDetect();
+    }
+
+    /** Остановка (пауза): руки замораживаются, продолжение — start()/resume(). */
+    stop(): void {
+        if (this.status !== 'detecting' && this.status !== 'scanning') return;
+        this.pausedFlag = true;
+        this.status = 'paused';
+        this.reason = 'Остановлено пользователем';
+    }
+
+    /** Возобновление после паузы. */
+    resume(): void {
+        if (this.status !== 'paused') return;
+        this.pausedFlag = false;
+        this.neterrStreak = 0;
+        this.reason = null;
+        if (this.arms.length > 0) {
+            this.status = 'scanning';
+        } else {
+            // Пауза случилась до создания рук — разведку начинаем заново.
+            this.status = 'detecting';
+            this.beginDetect();
+        }
+        const waiters = this.resumeWaiters;
+        this.resumeWaiters = [];
+        for (const w of waiters) w();
+    }
+
+    /** Полный сброс сканера (находки тоже очищаются). */
+    reset(): void {
+        this.generation += 1;
+        this.pausedFlag = false;
+        const waiters = this.resumeWaiters;
+        this.resumeWaiters = [];
+        for (const w of waiters) w();
+        this.connection = null;
+        this.status = 'idle';
+        this.reason = null;
+        this.mode = null;
+        this.probed = 0;
+        this.arms = [];
+        this.visited.clear();
+        this.foundMap.clear();
+        this.neterrStreak = 0;
+        this.probeTimestamps = [];
+    }
+
+    /** Сериализация для персистентности (M3). */
+    serialize(): PersistedScanState | null {
+        if (this.connection === null) return null;
+        return {
+            connection: this.connection,
+            status: this.status,
+            mode: this.mode,
+            probed: this.probed,
+            arms: this.arms.map((a) => ({ ...a, sweepQueue: [...a.sweepQueue] })),
+            found: this.foundList(),
+        };
+    }
+
+    /**
+     * Восстановление после рестарта. Возвращает wasRunning: скан/разведка были активны.
+     * Активный статус переводится в paused — автопродолжение решает владелец (M3).
+     */
+    restore(state: PersistedScanState): boolean {
+        this.reset();
+        this.connection = state.connection;
+        this.mode = state.mode;
+        this.probed = state.probed;
+        this.arms = state.arms.map((a) => ({ ...a, sweepQueue: [...a.sweepQueue] }));
+        for (const f of state.found) this.foundMap.set(f.number, f);
+        const wasRunning = state.status === 'scanning' || state.status === 'detecting';
+        this.status = wasRunning ? 'paused' : state.status;
+        this.reason = wasRunning ? 'Остановлено перезапуском сервера' : null;
+        // visited не сохраняется (план) — повторные пробои после рестарта допустимы.
+        return wasRunning;
+    }
+
+    // --- внутреннее ---
+
+    private eps(): number {
+        const now = Date.now();
+        const cutoff = now - EPS_WINDOW_MS;
+        while (this.probeTimestamps.length > 0 && (this.probeTimestamps[0] ?? 0) < cutoff) {
+            this.probeTimestamps.shift();
+        }
+        return this.probeTimestamps.length / (EPS_WINDOW_MS / 1000);
+    }
+
+    /** Ожидание паузы; false — цикл должен прерваться (reset). */
+    private async waitGate(gen: number): Promise<boolean> {
+        while (this.pausedFlag) {
+            if (gen !== this.generation) return false;
+            await new Promise<void>((resolve) => this.resumeWaiters.push(resolve));
+        }
+        return gen === this.generation;
+    }
+
+    private pauseNeterr(): void {
+        this.pausedFlag = true;
+        this.status = 'paused';
+        this.reason = 'Сетевые ошибки: сервер не отвечает. Продолжите вручную';
+    }
+
+    private beginDetect(): void {
+        const gen = this.generation;
+        this.status = 'detecting';
+        this.reason = null;
+        this.mode = null;
+        this.probed = 0;
+        this.neterrStreak = 0;
+        this.arms = [];
+        this.visited.clear();
+        this.probeTimestamps = [];
+        const conn = this.connection;
+        if (conn === null) return;
+        void this.detect(gen, conn).catch((err: unknown) => {
+            this.status = 'error';
+            this.reason = `Ошибка разведки: ${err instanceof Error ? err.message : String(err)}`;
+        });
+    }
+
+    /** Разведка блока start..start+DETECT_BLOCK-1. */
+    private async detect(gen: number, conn: TwonkyConnection): Promise<void> {
+        const startN = conn.startNumber;
+        const foundNumbers: number[] = [];
+        let anyResponse = false;
+
+        for (let base = 0; base < DETECT_BLOCK; base += PROBE_BATCH) {
+            if (!(await this.waitGate(gen))) return;
+
+            const items: number[] = [];
+            for (let k = 0; k < PROBE_BATCH && base + k < DETECT_BLOCK; k += 1) {
+                const n = startN + base + k;
+                if (!this.visited.has(n)) {
+                    this.visited.add(n);
+                    items.push(n);
+                }
+            }
+            const results = await Promise.all(items.map((n) => this.sem.run(() => this.prober.probe(n))));
+            this.probed += items.length;
+
+            const newFound: FoundFile[] = [];
+            for (const [i, n] of items.entries()) {
+                const res = results[i];
+                if (res === undefined) continue;
+                this.probeTimestamps.push(Date.now());
+                if (res.kind === 'neterr') {
+                    this.neterrStreak += 1;
+                    if (this.neterrStreak >= NETERR_PAUSE) {
+                        this.pauseNeterr();
+                        return;
+                    }
+                    continue;
+                }
+                this.neterrStreak = 0;
+                anyResponse = true;
+                if (res.kind === 'exists' && res.media !== null) {
+                    foundNumbers.push(n);
+                    this.registerFound(n, res, conn, newFound);
+                }
+            }
+            if (newFound.length > 0) this.foundSink?.(newFound);
+        }
+
+        if (!(await this.waitGate(gen))) return;
+
+        if (!anyResponse) {
+            this.status = 'error';
+            this.reason = 'Сервер не отвечает: в блоке разведки нет ни одного HTTP-ответа';
+            return;
+        }
+
+        this.mode = foundNumbers.length >= SEQ_THRESHOLD ? 'seq' : 'delta';
+        this.arms = this.buildArms(this.mode, startN, foundNumbers);
+        this.status = 'scanning';
+        for (const arm of this.arms) {
+            if (arm.state === 'run') void this.runArm(gen, arm);
+        }
+        this.checkDone();
+    }
+
+    /** Создание рук по итогам разведки. */
+    private buildArms(mode: ScanMode, startN: number, anchors: number[]): Arm[] {
+        const mk = (dir: ArmDir, pos: number, step: number): Arm => ({
+            dir,
+            pos,
+            step,
+            phase: 'scan',
+            state: outOfRange(pos) ? 'stopped' : 'run',
+            missStreak: 0,
+            jumpsDone: 0,
+            hadJump: false,
+            foundCount: 0,
+            foundSinceSweep: 0,
+            sweepQueue: [],
+            gapPos: 0,
+            gapMiss: 0,
+            resumePos: 0,
+            sparseLeft: 0,
+        });
+        if (mode === 'seq') {
+            return [mk(1, startN + DETECT_BLOCK, 1), mk(-1, startN - 1, 1)];
+        }
+        // delta: якоря = найденные номера (ноль найдено → виртуальный якорь на старте)
+        const list = anchors.length > 0 ? anchors : [startN];
+        const arms: Arm[] = [];
+        for (const a of list) {
+            arms.push(mk(1, a + STEP_DELTA, STEP_DELTA));
+            arms.push(mk(-1, a - STEP_DELTA, STEP_DELTA));
+        }
+        return arms;
+    }
+
+    /** Цикл руки до остановки. */
+    private async runArm(gen: number, arm: Arm): Promise<void> {
+        while (arm.state === 'run') {
+            if (!(await this.waitGate(gen))) return;
+
+            const batch = this.planBatch(arm);
+            if (isStopped(arm)) break;
+            if (batch.length === 0) {
+                // Нечего пробить (например, sparse упирается в visited) — не крутимся вхолостую.
+                await new Promise<void>((resolve) => setTimeout(resolve, 1));
+                continue;
+            }
+
+            await this.probeBatch(batch);
+
+            // Прыжки / смена фаз по итогам батча.
+            if (arm.phase === 'scan' && arm.missStreak >= MISS_LIMIT) {
+                arm.missStreak = 0;
+                if (arm.jumpsDone < JUMP_REPEATS) {
+                    arm.pos += arm.dir * JUMP_POSITIONS * arm.step;
+                    arm.jumpsDone += 1;
+                    arm.hadJump = true;
+                    if (outOfRange(arm.pos)) arm.state = 'stopped';
+                } else {
+                    arm.phase = 'sparse';
+                    arm.sparseLeft = SPARSE_PROBES;
+                }
+            }
+            if (arm.phase === 'gapfill' && arm.gapMiss >= MISS_LIMIT) {
+                this.finishGapfill(arm);
+            }
+            if (arm.phase === 'sparse' && arm.sparseLeft <= 0) {
+                // Все пробы разреженного поиска — промахи: конец библиотеки в эту сторону.
+                arm.state = 'stopped';
+            }
+        }
+        this.checkDone();
+    }
+
+    /** Планирование батча: сначала очередь плотного прохода, затем позиция фазы. */
+    private planBatch(arm: Arm): BatchItem[] {
+        const batch: BatchItem[] = [];
+
+        while (arm.sweepQueue.length > 0 && batch.length < PROBE_BATCH) {
+            const n = arm.sweepQueue.shift();
+            if (n === undefined) break;
+            if (outOfRange(n) || this.visited.has(n)) continue;
+            this.visited.add(n);
+            batch.push({ number: n, fromSweep: true, arm });
+        }
+
+        while (batch.length < PROBE_BATCH) {
+            if (arm.phase === 'scan') {
+                const n = arm.pos;
+                arm.pos += arm.step * arm.dir;
+                if (outOfRange(n)) {
+                    arm.state = 'stopped';
+                    break;
+                }
+                if (this.visited.has(n)) continue;
+                this.visited.add(n);
+                batch.push({ number: n, fromSweep: false, arm });
+            } else if (arm.phase === 'gapfill') {
+                const n = arm.gapPos;
+                if (this.visited.has(n) || outOfRange(n)) {
+                    // Дошли до разведанной зоны/границы — разрыв закрыт.
+                    this.finishGapfill(arm);
+                    continue;
+                }
+                arm.gapPos -= arm.step * arm.dir;
+                this.visited.add(n);
+                batch.push({ number: n, fromSweep: false, arm });
+            } else {
+                // sparse
+                if (arm.sparseLeft <= 0) break;
+                let attempts = 0;
+                let planned = true;
+                while (planned && batch.length < PROBE_BATCH && arm.sparseLeft > 0 && attempts < PROBE_BATCH * 2) {
+                    attempts += 1;
+                    const n = arm.pos + arm.dir * sparseStep(arm.step);
+                    arm.pos = n;
+                    if (outOfRange(n)) {
+                        arm.state = 'stopped';
+                        planned = false;
+                        break;
+                    }
+                    if (this.visited.has(n)) continue;
+                    this.visited.add(n);
+                    arm.sparseLeft -= 1;
+                    batch.push({ number: n, fromSweep: false, arm });
+                }
+                break;
+            }
+        }
+
+        return batch;
+    }
+
+    /** Выполнение батча проб с общим семафором и обработка результатов. */
+    private async probeBatch(batch: BatchItem[]): Promise<void> {
+        const results = await Promise.all(
+            batch.map((it) => this.sem.run(() => this.prober.probe(it.number))),
+        );
+        this.probed += batch.length;
+
+        const newFound: FoundFile[] = [];
+        let neterrNow = false;
+
+        for (const [i, it] of batch.entries()) {
+            const res = results[i];
+            if (res === undefined) continue;
+            this.probeTimestamps.push(Date.now());
+            const arm = it.arm;
+
+            if (res.kind === 'neterr') {
+                this.neterrStreak += 1;
+                neterrNow = true;
+                continue;
+            }
+            this.neterrStreak = 0;
+
+            if (res.kind === 'exists' && res.media !== null) {
+                this.handleFound(arm, it.number, res, newFound);
+                continue;
+            }
+
+            // Промах.
+            if (!it.fromSweep) {
+                if (arm.phase === 'scan') arm.missStreak += 1;
+                else if (arm.phase === 'gapfill') arm.gapMiss += 1;
+                // sparse: отдельного счётчика нет — только исчерпание sparseLeft.
+            }
+        }
+
+        if (newFound.length > 0) this.foundSink?.(newFound);
+        if (neterrNow && this.neterrStreak >= NETERR_PAUSE) this.pauseNeterr();
+    }
+
+    /** Обработка находки: регистрация + фазовые переходы руки. */
+    private handleFound(arm: Arm, n: number, res: ProbeResult, sink: FoundFile[]): void {
+        const conn = this.connection;
+        if (conn !== null) this.registerFound(n, res, conn, sink);
+
+        arm.missStreak = 0;
+        arm.gapMiss = 0;
+        arm.foundCount += 1;
+        arm.foundSinceSweep += 1;
+
+        if (arm.phase === 'sparse' || arm.hadJump) {
+            // Находка после прыжка/разреженного поиска — заполняем разрыв в обратную сторону.
+            arm.gapPos = n - arm.step * arm.dir;
+            arm.resumePos = n + arm.step * arm.dir;
+            arm.phase = 'gapfill';
+            arm.hadJump = false;
+            arm.gapMiss = 0;
+            // TODO(уточнить): счётчик прыжков сбрасываем — серия прервана находкой (новая область).
+            arm.jumpsDone = 0;
+        }
+
+        if (arm.foundSinceSweep >= DENSE_SWEEP_EVERY) {
+            this.enqueueSweep(arm, n);
+            arm.foundSinceSweep = 0;
+        }
+    }
+
+    /** Поставить в очередь плотный проход: 256 подряд идущих номеров вокруг находки. */
+    private enqueueSweep(arm: Arm, foundN: number): void {
+        const start = arm.dir === 1 ? foundN : foundN - (DETECT_BLOCK - 1);
+        for (let k = 0; k < DETECT_BLOCK; k += 1) {
+            const n = start + k;
+            if (!outOfRange(n)) arm.sweepQueue.push(n);
+        }
+    }
+
+    private finishGapfill(arm: Arm): void {
+        arm.phase = 'scan';
+        arm.pos = arm.resumePos;
+        arm.gapMiss = 0;
+        if (outOfRange(arm.pos)) arm.state = 'stopped';
+    }
+
+    /** Зарегистрировать файл (дедуп по номеру; состояние найденных не меняем). */
+    private registerFound(n: number, res: ProbeResult, conn: TwonkyConnection, sink: FoundFile[]): void {
+        if (this.foundMap.has(n)) return;
+        const contentType = res.contentType ?? 'application/octet-stream';
+        const tail = `${conn.prefix}${n}`;
+        const file: FoundFile = {
+            number: n,
+            url: fileUrl(conn, n),
+            tail,
+            contentType,
+            kind: res.media ?? 'image',
+            size: res.size ?? 0,
+            name: buildFileName(tail, contentType),
+            addedAt: Date.now(),
+        };
+        this.foundMap.set(n, file);
+        sink.push(file);
+    }
+
+    /** Все руки остановлены → скан завершён. */
+    private checkDone(): void {
+        if (this.status !== 'scanning') return;
+        if (this.arms.length > 0 && this.arms.every((a) => a.state === 'stopped')) {
+            this.status = 'done';
+            this.reason = null;
+        }
+    }
+}
