@@ -6,16 +6,16 @@
 
 /** Читает числовой параметр из окружения, при ошибке/отсутствии возвращает значение по умолчанию. */
 function envInt(name: string, def: number): number {
-  const raw = process.env[name];
-  if (raw === undefined || raw.trim() === '') return def;
-  const parsed = Number.parseInt(raw, 10);
-  return Number.isFinite(parsed) ? parsed : def;
+    const raw = process.env[name];
+    if (raw === undefined || raw.trim() === '') return def;
+    const parsed = Number.parseInt(raw, 10);
+    return Number.isFinite(parsed) ? parsed : def;
 }
 
 /** Читает строковый параметр из окружения, при отсутствии — значение по умолчанию. */
 function envStr(name: string, def: string): string {
-  const raw = process.env[name];
-  return raw !== undefined && raw.trim() !== '' ? raw.trim() : def;
+    const raw = process.env[name];
+    return raw !== undefined && raw.trim() !== '' ? raw.trim() : def;
 }
 
 // --- Сканер: нумерация и режимы ---
@@ -104,10 +104,10 @@ export const NAME_SUFFIX_LIMIT = 100;
 
 /** Доступные размеры превью S/M/L/XL (запрашиваются как ?scale=WxH). */
 export const THUMB_SIZES: Readonly<Record<string, readonly [number, number]>> = {
-  S: [100, 80],
-  M: [200, 160],
-  L: [400, 320],
-  XL: [800, 640],
+    S: [100, 80],
+    M: [200, 160],
+    L: [400, 320],
+    XL: [800, 640],
 };
 
 /** Кламп ширины/высоты превью. */

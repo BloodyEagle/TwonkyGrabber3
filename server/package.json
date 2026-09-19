@@ -12,8 +12,8 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "typecheck": "tsc --noEmit",
-    "test": "tsx --test test/url-parser.spec.ts test/scanner.spec.ts test/downloader-naming.spec.ts"
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
+    "test": "tsx --test test/url-parser.spec.ts test/probe.spec.ts"
   },
   "dependencies": {
     "express": "^4.19.2"
