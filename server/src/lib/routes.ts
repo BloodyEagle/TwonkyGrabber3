@@ -1,11 +1,19 @@
 /**
  * REST + SSE маршруты API (план, п.8).
  * M2: /api/health, /api/connect, /api/scan/*, /api/events.
- * Очередь, файлы, настройки и сброс подключаются на следующих шагах (M3/M4).
+ * M3: /api/files.
+ * Очередь, настройки и сброс подключаются на следующем шаге (M4).
  */
 import { Router } from 'express';
 import type { Request, Response } from 'express';
-import { SSE_FOUND_FLUSH_MS, SSE_HEARTBEAT_MS, SSE_SCAN_MS } from '../config';
+import {
+    FILES_PAGE_DEFAULT,
+    FILES_PAGE_SIZE_DEFAULT,
+    FILES_PAGE_SIZE_MAX,
+    SSE_FOUND_FLUSH_MS,
+    SSE_HEARTBEAT_MS,
+    SSE_SCAN_MS,
+} from '../config';
 import { checkAvailable } from './probe';
 import { fileUrl, parseConnectionUrl } from './url-parser';
 import type { Scanner } from './scanner';
@@ -73,6 +81,21 @@ class SseHub {
     }
 }
 
+/** Значение query-параметра как строка (первый элемент массива допускается). */
+function queryToString(value: unknown): string | null {
+    if (typeof value === 'string') return value;
+    if (Array.isArray(value) && typeof value[0] === 'string') return value[0];
+    return null;
+}
+
+/** Целое из query с дефолтом; null — указано, но не целое или отрицательное. */
+function queryToInt(value: unknown, def: number): number | null {
+    const raw = queryToString(value);
+    if (raw === null || raw === '') return def;
+    const parsed = Number.parseInt(raw, 10);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+}
+
 /** Создание Express-роутера со всеми API. */
 export function createApiRouter(deps: ApiDeps): Router {
     const { scanner } = deps;
@@ -127,6 +150,41 @@ export function createApiRouter(deps: ApiDeps): Router {
 
     router.get('/scan/status', (_req, res) => {
         res.json(scanner.progress());
+    });
+
+    // Список найденных файлов: пагинация, фильтр по типу, сортировка по номеру.
+    router.get('/files', (req, res) => {
+        const page = queryToInt(req.query.page, FILES_PAGE_DEFAULT);
+        const size = queryToInt(req.query.size, FILES_PAGE_SIZE_DEFAULT);
+        const sort = queryToString(req.query.sort) ?? 'asc';
+        const type = queryToString(req.query.type) ?? 'all';
+        if (page === null || page < 1) {
+            res.status(400).json({ ok: false, reason: 'Параметр page должен быть целым числом не меньше 1' });
+            return;
+        }
+        if (size === null || size < 1) {
+            res.status(400).json({ ok: false, reason: 'Параметр size должен быть целым числом не меньше 1' });
+            return;
+        }
+        if (sort !== 'asc' && sort !== 'desc') {
+            res.status(400).json({ ok: false, reason: 'sort может быть только asc или desc' });
+            return;
+        }
+        if (type !== 'all' && type !== 'image' && type !== 'video') {
+            res.status(400).json({ ok: false, reason: 'type может быть только all, image или video' });
+            return;
+        }
+        const clampedSize = Math.min(size, FILES_PAGE_SIZE_MAX);
+        const all = scanner.foundList();
+        const filtered = type === 'all' ? all : all.filter((f) => f.kind === type);
+        if (sort === 'desc') filtered.reverse();
+        const start = (page - 1) * clampedSize;
+        res.json({
+            total: filtered.length,
+            page,
+            size: clampedSize,
+            items: filtered.slice(start, start + clampedSize),
+        });
     });
 
     router.get('/events', (req, res) => {
