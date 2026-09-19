@@ -31,10 +31,32 @@ export interface HttpMetaOptions {
     timeoutMs: number;
 }
 
-/** Абстракция транспорта для внедрения моков в тестах. */
-export interface HttpTransport {
+/** Ответ со стримом тела (для скачивания файлов). */
+export interface HttpStreamResponse {
+    status: number;
+    headers: IncomingHttpHeaders;
+    /** Поток тела ответа; уничтожается destroy() при таймауте простоя. */
+    stream: NodeJS.ReadableStream & { destroy(err?: Error | undefined): void };
+}
+
+export interface HttpStreamOptions {
+    headers?: Record<string, string>;
+    /** Таймаут простоя: сбрасывается на каждый чанк (большие файлы качаются часами). */
+    idleTimeoutMs: number;
+}
+
+/** Транспорт мета-запросов (HEAD/GET без тела) — мокается в тестах probe. */
+export interface HttpMetaTransport {
     meta(url: string, options: HttpMetaOptions): Promise<HttpMetaResponse>;
 }
+
+/** Транспорт стримингового GET — используется реальным загрузчиком. */
+export interface HttpStreamTransport {
+    stream(url: string, options: HttpStreamOptions): Promise<HttpStreamResponse>;
+}
+
+/** Полный транспорт: мета-запросы + стриминг тела. */
+export interface HttpTransport extends HttpMetaTransport, HttpStreamTransport {}
 
 /** Пауза, мс. Вынесена сюда: используется probe (ретраи) и сканер. */
 export function sleep(ms: number): Promise<void> {
@@ -107,6 +129,71 @@ export const nodeTransport: HttpTransport = {
                     // destroy по таймауту уже отдаёт NetworkError; прочее — оборачиваем.
                     fail(err);
                 }
+            });
+
+            req.end();
+        });
+    },
+
+    /**
+     * Стриминговый GET: промис резолвится сразу по заголовкам ответа,
+     * тело отдаётся потоком. Таймаут — на простой между чанками
+     * (скачивание большого файла не ограничено по общему времени).
+     */
+    stream(url, options): Promise<HttpStreamResponse> {
+        return new Promise<HttpStreamResponse>((resolve, reject) => {
+            let parsed: URL;
+            try {
+                parsed = new URL(url);
+            } catch {
+                reject(new NetworkError(`Некорректный URL: ${url}`));
+                return;
+            }
+
+            const isHttps = parsed.protocol === 'https:';
+            const mod = isHttps ? https : http;
+
+            const reqOptions: http.RequestOptions = {
+                method: 'GET',
+                headers: options.headers,
+            };
+            // Игнорируем просроченные/самоподписанные сертификаты Twonky.
+            if (isHttps) (reqOptions as https.RequestOptions).rejectUnauthorized = false;
+
+            const fail = (err: unknown): void => {
+                if (err instanceof NetworkError) reject(err);
+                else if (err instanceof Error) reject(new NetworkError(err.message));
+                else reject(new NetworkError(String(err)));
+            };
+
+            let timer: NodeJS.Timeout | undefined;
+
+            const armIdleTimer = (): void => {
+                if (timer !== undefined) clearTimeout(timer);
+                timer = setTimeout(() => {
+                    req.destroy(new NetworkError(`Таймаут простоя ${options.idleTimeoutMs} мс: ${url}`));
+                }, options.idleTimeoutMs);
+            };
+
+            const req = mod.request(parsed, reqOptions, (res) => {
+                armIdleTimer();
+                // Резолвим по заголовкам: статус решает, дописывать или начинать с нуля.
+                resolve({status: res.statusCode ?? 0, headers: res.headers, stream: res});
+                res.on('data', () => {
+                    armIdleTimer();
+                });
+                res.on('end', () => {
+                    if (timer !== undefined) clearTimeout(timer);
+                });
+                res.on('error', (err) => {
+                    if (timer !== undefined) clearTimeout(timer);
+                    fail(err);
+                });
+            });
+
+            req.on('error', (err) => {
+                if (timer !== undefined) clearTimeout(timer);
+                fail(err);
             });
 
             req.end();

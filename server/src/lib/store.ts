@@ -1,17 +1,18 @@
 /**
  * Персистентное состояние сервера (план, п.5.10, п.6).
  * Запись атомарная (tmp + rename), каждые SAVE_EVERY_MS и при завершении процесса.
- * Очередь скачивания добавляется в M4 (поле queue).
  */
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { SAVE_EVERY_MS, STATE_FILE } from '../config';
 import type { PersistedScanState } from './scanner';
+import type { PersistedQueueState } from './downloader';
 
 /** Корень state.json. */
 export interface PersistedState {
     version: 1;
     scan: PersistedScanState | null;
+    queue: PersistedQueueState | null;
 }
 
 /** Минимальная структурная валидация секции сканера (своему файлу доверяем). */
@@ -19,6 +20,13 @@ function isPersistedScan(value: unknown): value is PersistedScanState {
     if (typeof value !== 'object' || value === null) return false;
     const v = value as Record<string, unknown>;
     return typeof v.connection === 'object' && v.connection !== null;
+}
+
+/** Минимальная структурная валидация секции очереди. */
+function isPersistedQueue(value: unknown): value is PersistedQueueState {
+    if (typeof value !== 'object' || value === null) return false;
+    const v = value as Record<string, unknown>;
+    return Array.isArray(v.items);
 }
 
 /**
@@ -46,7 +54,11 @@ export class Store {
                 console.warn('[store] неизвестная версия state.json — состояние игнорируется');
                 return null;
             }
-            return { version: 1, scan: isPersistedScan(v.scan) ? v.scan : null };
+            return {
+                version: 1,
+                scan: isPersistedScan(v.scan) ? v.scan : null,
+                queue: isPersistedQueue(v.queue) ? v.queue : null,
+            };
         } catch (err: unknown) {
             console.warn(
                 `[store] state.json повреждён (${err instanceof Error ? err.message : String(err)}) — стартуем с нуля`,

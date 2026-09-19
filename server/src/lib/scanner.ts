@@ -109,15 +109,19 @@ export class Scanner {
     private generation = 0;
     private pausedFlag = false;
     private resumeWaiters: Array<() => void> = [];
-    private foundSink: ((files: FoundFile[]) => void) | null = null;
+    private readonly foundSinks: Array<(files: FoundFile[]) => void> = [];
     private probeTimestamps: number[] = [];
     private readonly sem = new Semaphore(PROBE_CONCURRENCY);
 
     constructor(private readonly prober: Prober) {}
 
-    /** Приёмник находок (SSE-хаб буферизует и рассылает батчами). */
-    setOnFound(sink: (files: FoundFile[]) => void): void {
-        this.foundSink = sink;
+    /** Приёмник находок: SSE-хаб (батчи для фронта) и загрузчик (autoAll). */
+    addOnFound(sink: (files: FoundFile[]) => void): void {
+        this.foundSinks.push(sink);
+    }
+
+    private emitFound(files: FoundFile[]): void {
+        for (const sink of this.foundSinks) sink(files);
     }
 
     getConnection(): TwonkyConnection | null {
@@ -145,6 +149,11 @@ export class Scanner {
     /** Найденные файлы, отсортированные по номеру. */
     foundList(): FoundFile[] {
         return [...this.foundMap.values()].sort((a, b) => a.number - b.number);
+    }
+
+    /** Найденный файл по номеру (для постановки в очередь скачивания). */
+    getFound(number: number): FoundFile | null {
+        return this.foundMap.get(number) ?? null;
     }
 
     /** Запуск скана; при paused — возобновление. */
@@ -318,7 +327,7 @@ export class Scanner {
                     this.registerFound(n, res, conn, newFound);
                 }
             }
-            if (newFound.length > 0) this.foundSink?.(newFound);
+            if (newFound.length > 0) this.emitFound(newFound);
         }
 
         if (!(await this.waitGate(gen))) return;
@@ -504,7 +513,7 @@ export class Scanner {
             }
         }
 
-        if (newFound.length > 0) this.foundSink?.(newFound);
+        if (newFound.length > 0) this.emitFound(newFound);
         if (neterrNow && this.neterrStreak >= NETERR_PAUSE) this.pauseNeterr();
     }
 

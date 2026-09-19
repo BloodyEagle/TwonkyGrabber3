@@ -10,7 +10,7 @@
 import {PROBE_RETRIES, PROBE_RETRY_DELAYS_MS, PROBE_TIMEOUT} from '../config';
 import type {FileKind} from './types';
 import {NetworkError, nodeTransport, sleep} from './http';
-import type {HttpMetaResponse, HttpTransport} from './http';
+import type {HttpMetaResponse, HttpMetaTransport} from './http';
 
 /** Класс исхода пробы. */
 export type ProbeKind = 'exists' | 'missing' | 'neterr';
@@ -27,7 +27,7 @@ export interface ProbeResult {
 }
 
 export interface ProbeDeps {
-    transport: HttpTransport;
+    transport: HttpMetaTransport;
     /** Подставляется в тестах, чтобы не ждать реальных задержек ретраев. */
     sleep?: (ms: number) => Promise<void>;
 }
@@ -96,7 +96,7 @@ function classify(res: HttpMetaResponse, via: string): ProbeResult {
 }
 
 /** Одна попытка: HEAD, при 405/501 — GET с Range: bytes=0-0. */
-async function probeOnce(url: string, transport: HttpTransport): Promise<ProbeResult> {
+async function probeOnce(url: string, transport: HttpMetaTransport): Promise<ProbeResult> {
     try {
         const head = await transport.meta(url, {method: 'HEAD', timeoutMs: PROBE_TIMEOUT});
         if (head.status === 405 || head.status === 501) {
@@ -141,7 +141,7 @@ export async function probeUrl(url: string, deps: ProbeDeps = {transport: nodeTr
  * Проверка доступности сервера при подключении: любой HTTP-ответ (в т.ч. 404/405)
  * означает, что сервер жив. true — доступен, false — сетевая ошибка на всех методах.
  */
-export async function checkAvailable(url: string, transport: HttpTransport = nodeTransport): Promise<boolean> {
+export async function checkAvailable(url: string, transport: HttpMetaTransport = nodeTransport): Promise<boolean> {
     try {
         await transport.meta(url, {method: 'HEAD', timeoutMs: PROBE_TIMEOUT});
         return true;

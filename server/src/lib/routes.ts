@@ -2,7 +2,7 @@
  * REST + SSE маршруты API (план, п.8).
  * M2: /api/health, /api/connect, /api/scan/*, /api/events.
  * M3: /api/files.
- * Очередь, настройки и сброс подключаются на следующем шаге (M4).
+ * M4: /api/queue*, /api/settings, /api/state/reset; SSE-событие queue.
  */
 import { Router } from 'express';
 import type { Request, Response } from 'express';
@@ -10,27 +10,36 @@ import {
     FILES_PAGE_DEFAULT,
     FILES_PAGE_SIZE_DEFAULT,
     FILES_PAGE_SIZE_MAX,
+    QUEUE_PAGE_DEFAULT,
+    QUEUE_PAGE_SIZE_DEFAULT,
+    QUEUE_PAGE_SIZE_MAX,
     SSE_FOUND_FLUSH_MS,
     SSE_HEARTBEAT_MS,
+    SSE_QUEUE_MS,
     SSE_SCAN_MS,
 } from '../config';
 import { checkAvailable } from './probe';
 import { fileUrl, parseConnectionUrl } from './url-parser';
 import type { Scanner } from './scanner';
+import type { Downloader } from './downloader';
 import type { FoundFile } from './types';
 
 export interface ApiDeps {
     scanner: Scanner;
+    downloader: Downloader;
 }
 
-/** SSE-хаб: scan ~каждые 500 мс, found — батчами, heartbeat, снимок при подключении. */
+/** SSE-хаб: scan ~500 мс, found — батчами, queue ~1 с, heartbeat, снимок при подключении. */
 class SseHub {
     private readonly clients = new Set<Response>();
     private foundBuffer: FoundFile[] = [];
     private readonly timers: NodeJS.Timeout[] = [];
 
-    constructor(private readonly scanner: Scanner) {
-        scanner.setOnFound((files) => {
+    constructor(
+        private readonly scanner: Scanner,
+        private readonly downloader: Downloader,
+    ) {
+        scanner.addOnFound((files) => {
             this.foundBuffer.push(...files);
         });
 
@@ -52,6 +61,12 @@ class SseHub {
 
         this.timers.push(
             setInterval(() => {
+                if (this.clients.size > 0) this.sendAll('queue', downloader.state());
+            }, SSE_QUEUE_MS),
+        );
+
+        this.timers.push(
+            setInterval(() => {
                 for (const res of this.clients) res.write(': hb\n\n');
             }, SSE_HEARTBEAT_MS),
         );
@@ -65,7 +80,7 @@ class SseHub {
         });
         // Снимок сразу при подключении.
         this.send(res, 'scan', this.scanner.progress());
-        // TODO(M4): снимок очереди после подключения загрузчика.
+        this.send(res, 'queue', this.downloader.state());
         this.clients.add(res);
         req.on('close', () => {
             this.clients.delete(res);
@@ -98,9 +113,9 @@ function queryToInt(value: unknown, def: number): number | null {
 
 /** Создание Express-роутера со всеми API. */
 export function createApiRouter(deps: ApiDeps): Router {
-    const { scanner } = deps;
+    const { scanner, downloader } = deps;
     const router = Router();
-    const hub = new SseHub(scanner);
+    const hub = new SseHub(scanner, downloader);
 
     router.get('/health', (_req, res) => {
         res.json({ ok: true });
@@ -185,6 +200,94 @@ export function createApiRouter(deps: ApiDeps): Router {
             size: clampedSize,
             items: filtered.slice(start, start + clampedSize),
         });
+    });
+
+    // --- Очередь скачивания (план, п.8) ---
+
+    router.post('/queue', (req, res) => {
+        const raw = req.body?.numbers;
+        if (!Array.isArray(raw)) {
+            res.status(400).json({ ok: false, reason: 'Ожидается массив numbers' });
+            return;
+        }
+        const numbers = raw.filter((n): n is number => Number.isInteger(n));
+        const added = downloader.add(numbers);
+        res.json({ ok: true, added });
+    });
+
+    router.post('/queue/all', (_req, res) => {
+        const added = downloader.addAll();
+        res.json({ ok: true, added });
+    });
+
+    router.post('/queue/pause', (_req, res) => {
+        downloader.pause();
+        res.json({ ok: true });
+    });
+
+    router.post('/queue/resume', (_req, res) => {
+        downloader.resume();
+        res.json({ ok: true });
+    });
+
+    router.post('/queue/retry-failed', (_req, res) => {
+        downloader.retryFailed();
+        res.json({ ok: true });
+    });
+
+    router.post('/queue/clear-completed', (_req, res) => {
+        downloader.clearCompleted();
+        res.json({ ok: true });
+    });
+
+    router.delete('/queue/:number', (req, res) => {
+        const number = Number.parseInt(String(req.params.number), 10);
+        if (!Number.isFinite(number)) {
+            res.status(400).json({ ok: false, reason: 'Некорректный номер файла' });
+            return;
+        }
+        const result = downloader.remove(number);
+        if (result === null) {
+            res.status(404).json({ ok: false, reason: 'Элемент очереди не найден' });
+            return;
+        }
+        if (result === false) {
+            res.status(409).json({ ok: false, reason: 'Файл сейчас скачивается' });
+            return;
+        }
+        res.json({ ok: true });
+    });
+
+    router.get('/queue', (req, res) => {
+        const page = queryToInt(req.query.page, QUEUE_PAGE_DEFAULT);
+        const size = queryToInt(req.query.size, QUEUE_PAGE_SIZE_DEFAULT);
+        if (page === null || page < 1 || size === null || size < 1) {
+            res.status(400).json({ ok: false, reason: 'Параметры page и size должны быть целыми не меньше 1' });
+            return;
+        }
+        const clamped = Math.min(size, QUEUE_PAGE_SIZE_MAX);
+        res.json({ ...downloader.state(), ...downloader.itemsPage(page, clamped) });
+    });
+
+    // --- Настройки и сброс состояния ---
+
+    router.get('/settings', (_req, res) => {
+        res.json(downloader.settings());
+    });
+
+    router.post('/settings', (req, res) => {
+        downloader.applySettings(req.body ?? {});
+        res.json(downloader.settings());
+    });
+
+    router.post('/state/reset', (req, res) => {
+        const body = req.body ?? {};
+        // Оба флага по умолчанию true; значения неверно типа трактуются как false.
+        const scan = body.scan === undefined ? true : body.scan === true;
+        const queue = body.queue === undefined ? true : body.queue === true;
+        if (scan) scanner.reset();
+        if (queue) downloader.resetQueue();
+        res.json({ ok: true });
     });
 
     router.get('/events', (req, res) => {
