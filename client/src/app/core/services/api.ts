@@ -42,10 +42,14 @@ export interface ScanProgress {
     mode: 'seq' | 'delta' | null;
     probed: number;
     found: number;
+    foundImages: number;
+    foundVideos: number;
     eps: number;
     arms: ArmView[];
     /** Точные счётчики сервера из /rpc/info_status (null — недоступна). */
     stats: { pictures: number; videos: number } | null;
+    /** Эпоха библиотеки: меняется при сбросе скана (инвалидация кэша превью). */
+    epoch: number;
 }
 
 export type QueueStatus = 'pending' | 'active' | 'done' | 'skipped' | 'failed';
@@ -169,14 +173,14 @@ interface ApiError {
 /** REST-клиент /api (план, §8). Все запросы браузера идут только сюда. */
 @Injectable({ providedIn: 'root' })
 export class ApiService {
-    /** URL превью через прокси. */
-    thumbUrl(number: number, w: number, h: number): string {
-        return `/api/thumb?n=${number}&w=${w}&h=${h}`;
+    /** URL превью через прокси; epoch — версия библиотеки против кэша браузера. */
+    thumbUrl(number: number, w: number, h: number, epoch: number): string {
+        return `/api/thumb?n=${number}&w=${w}&h=${h}&v=${epoch}`;
     }
 
     /** URL оригинала (открытие полного изображения). */
-    originalUrl(number: number): string {
-        return `/api/thumb?n=${number}&orig=1`;
+    originalUrl(number: number, epoch: number): string {
+        return `/api/thumb?n=${number}&orig=1&v=${epoch}`;
     }
 
     async connect(url: string): Promise<{ connection: TwonkyConnection }> {

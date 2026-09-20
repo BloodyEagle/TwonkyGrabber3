@@ -31,9 +31,12 @@ export class StateStore {
         mode: null,
         probed: 0,
         found: 0,
+        foundImages: 0,
+        foundVideos: 0,
         eps: 0,
         arms: [],
         stats: null,
+        epoch: 0,
     });
     readonly scanRunning = computed(() => {
         const s = this.scan().status;

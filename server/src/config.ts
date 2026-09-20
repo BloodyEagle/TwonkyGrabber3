@@ -33,6 +33,11 @@ export const JUMP_REPEATS = 5;
 export const SPARSE_PROBES = 100;
 export const SPARSE_MIN = 1000;
 export const SPARSE_MAX = 10000;
+/** Шаг между блоками поиска при нулевой разведке (256 = сплошное покрытие). */
+export const SEARCH_STRIDE = 256;
+
+/** Предел проб поиска на руку (страховка от бесконечного перебора «пустого» сервера). */
+export const SEARCH_LIMIT_PROBES = 400_000;
 export const DENSE_SWEEP_EVERY = 2000;
 export const MAX_NUMBER = 10_000_000;
 export const EPS_WINDOW_MS = 5000;
@@ -98,6 +103,8 @@ export interface RuntimeConfig {
     SPARSE_PROBES: number;
     SPARSE_MIN: number;
     SPARSE_MAX: number;
+    SEARCH_STRIDE: number;
+    SEARCH_LIMIT_PROBES: number;
     DENSE_SWEEP_EVERY: number;
     MAX_NUMBER: number;
     EPS_WINDOW_MS: number;
@@ -150,6 +157,8 @@ export const DEFAULT_CONFIG: RuntimeConfig = {
     SPARSE_PROBES,
     SPARSE_MIN,
     SPARSE_MAX,
+    SEARCH_STRIDE,
+    SEARCH_LIMIT_PROBES,
     DENSE_SWEEP_EVERY,
     MAX_NUMBER,
     EPS_WINDOW_MS,
@@ -196,7 +205,7 @@ export const C: RuntimeConfig = structuredClone(DEFAULT_CONFIG);
 
 const NUMBER_KEYS: readonly (keyof RuntimeConfig)[] = [
     'START_NUMBER', 'DETECT_BLOCK', 'SEQ_THRESHOLD', 'STEP_DELTA', 'MISS_LIMIT',
-    'JUMP_POSITIONS', 'JUMP_REPEATS', 'SPARSE_PROBES', 'SPARSE_MIN', 'SPARSE_MAX',
+    'JUMP_POSITIONS', 'JUMP_REPEATS',     'SPARSE_PROBES', 'SPARSE_MIN', 'SPARSE_MAX', 'SEARCH_STRIDE', 'SEARCH_LIMIT_PROBES',
     'DENSE_SWEEP_EVERY', 'MAX_NUMBER', 'EPS_WINDOW_MS', 'PROBE_CONCURRENCY', 'PROBE_BATCH',
     'PROBE_TIMEOUT', 'PROBE_RETRIES', 'NETERR_PAUSE', 'DL_START_THREADS', 'DL_MAX_THREADS',
     'DL_MIN_THREADS', 'DL_ADJUST_MS', 'DL_SPEED_UP', 'DL_SPEED_DOWN', 'DL_FAILS_THRESHOLD',

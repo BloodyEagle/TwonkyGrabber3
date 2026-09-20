@@ -28,6 +28,8 @@ export const CONFIG_GROUPS: readonly ConfigGroup[] = [
             { key: 'SPARSE_PROBES', label: 'Проб разреженного поиска' },
             { key: 'SPARSE_MIN', label: 'Мин. шаг sparse' },
             { key: 'SPARSE_MAX', label: 'Макс. шаг sparse' },
+            { key: 'SEARCH_STRIDE', label: 'Шаг блоков поиска', hint: '256 = сплошное покрытие; при 0 найдено в разведке' },
+            { key: 'SEARCH_LIMIT_PROBES', label: 'Предел проб поиска', hint: 'на руку; страховка на «пустых» серверах' },
             { key: 'DENSE_SWEEP_EVERY', label: 'Плотный проход каждые N находок' },
             { key: 'MAX_NUMBER', label: 'Потолок номера' },
             { key: 'EPS_WINDOW_MS', label: 'Окно расчёта eps, мс' },

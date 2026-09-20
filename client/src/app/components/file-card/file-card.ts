@@ -25,8 +25,10 @@ export class FileCard {
     protected readonly realDims = signal<string | null>(null);
 
     protected readonly selected = computed(() => this.store.selection().has(this.file().number));
-    protected readonly thumbSrc = computed(() => this.api.thumbUrl(this.file().number, this.thumb().w, this.thumb().h));
-    protected readonly originalHref = computed(() => this.api.originalUrl(this.file().number));
+    protected readonly thumbSrc = computed(() =>
+        this.api.thumbUrl(this.file().number, this.thumb().w, this.thumb().h, this.store.scan().epoch),
+    );
+    protected readonly originalHref = computed(() => this.api.originalUrl(this.file().number, this.store.scan().epoch));
 
     protected onShiftClick(event: MouseEvent): void {
         event.preventDefault();

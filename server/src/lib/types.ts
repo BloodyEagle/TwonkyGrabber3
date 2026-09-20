@@ -85,7 +85,7 @@ export interface QueueItemView {
 // --- Сканер: руки ---
 
 export type ArmDir = 1 | -1;
-export type ArmPhase = 'scan' | 'gapfill' | 'sparse';
+export type ArmPhase = 'scan' | 'gapfill' | 'sparse' | 'search';
 export type ArmState = 'run' | 'stopped';
 
 /** Внутреннее (и персистентное) состояние руки сканера. */
@@ -109,6 +109,8 @@ export interface Arm {
     resumePos: number;
     /** Осталось проб в фазе sparse. */
     sparseLeft: number;
+    /** Осталось номеров в текущем блоке фазы search (поиск базы библиотеки). */
+    searchLeft: number;
 }
 
 /** Представление руки для фронтенда (в ScanProgress). */
@@ -130,11 +132,16 @@ export interface ScanProgress {
     mode: ScanMode;
     probed: number;
     found: number;
+    /** Найдено изображений/видео по отдельности (для «найдено/всего» по типам). */
+    foundImages: number;
+    foundVideos: number;
     /** Скорость проб, проб/с (eps). */
     eps: number;
     arms: ArmView[];
     /** Точные счётчики сервера из /rpc/info_status (null — статистика недоступна). */
     stats: { pictures: number; videos: number } | null;
+    /** Эпоха библиотеки: меняется при сбросе скана (инвалидация кэша превью). */
+    epoch: number;
 }
 
 // --- Очередь: агрегаты ---

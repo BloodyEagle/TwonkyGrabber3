@@ -67,14 +67,19 @@ export function parseConnectionUrl(raw: string): ParseResult {
     // Отделяем хвост (префикс + номер) от базового пути.
     const pathname = url.pathname;
     const lastSlash = pathname.lastIndexOf('/');
-    const lastSeg = pathname.slice(lastSlash + 1);
+    const lastSegRaw = pathname.slice(lastSlash + 1);
+    // Ссылки с расширением (…/O0$2$20I131100.JPG): расширение отрезаем до разбора хвоста,
+    // иначе «хвост не распознан» → номер-дефолт, а путь с сегментом файла становится basePath,
+    // и Twonky отвечает одним и тем же файлом на любой номер в таком «вложенном» URL.
+    const dot = lastSegRaw.lastIndexOf('.');
+    const lastSeg = dot > 0 ? lastSegRaw.slice(0, dot) : lastSegRaw;
     const tailMatch = TAIL_RE.exec(lastSeg);
 
     let basePath: string;
     let prefix: string;
     let startNumber: number;
     if (tailMatch !== null) {
-        basePath = pathname.slice(0, pathname.length - lastSeg.length);
+        basePath = pathname.slice(0, pathname.length - lastSegRaw.length);
         const tailPrefix = tailMatch[1] ?? '';
         const tailDigits = tailMatch[2] ?? '';
         prefix = tailPrefix === '' ? C.DEFAULT_PREFIX : tailPrefix;

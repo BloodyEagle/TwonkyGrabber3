@@ -154,14 +154,23 @@ export class Scanner {
 
     /** Текущий прогресс для фронта. */
     progress(): ScanProgress {
+        let foundImages = 0;
+        let foundVideos = 0;
+        for (const f of this.foundMap.values()) {
+            if (f.kind === 'image') foundImages += 1;
+            else if (f.kind === 'video') foundVideos += 1;
+        }
         return {
             status: this.status,
             reason: this.reason,
             mode: this.mode,
             probed: this.probed,
             found: this.foundMap.size,
+            foundImages,
+            foundVideos,
             eps: this.eps(),
             stats: this.serverTotals,
+            epoch: this.epochValue,
             arms: this.arms.map((a) => ({
                 dir: a.dir,
                 pos: a.pos,
@@ -210,6 +219,19 @@ export class Scanner {
         this.reason = null;
         if (this.arms.length > 0) {
             this.status = 'scanning';
+        } else if (this.lastDetectStart !== null) {
+            // Пауза во время разведки после находки поиска — продолжаем от неё,
+            // найденные файлы станут якорями (foundMap учитывается в detect).
+            this.status = 'detecting';
+            const startN = this.lastDetectStart;
+            const conn = this.connection;
+            if (conn !== null) {
+                const gen = this.generation;
+                void this.detect(gen, conn, startN).catch((err: unknown) => {
+                    this.status = 'error';
+                    this.reason = `Ошибка разведки: ${err instanceof Error ? err.message : String(err)}`;
+                });
+            }
         } else {
             // Пауза случилась до создания рук — разведку начинаем заново.
             this.status = 'detecting';
@@ -220,9 +242,13 @@ export class Scanner {
         for (const w of waiters) w();
     }
 
+    /** Старт последней разведки (для возобновления после паузы). */
+    private lastDetectStart: number | null = null;
+
     /** Полный сброс сканера (находки тоже очищаются). */
     reset(): void {
         this.generation += 1;
+        this.epochValue += 1;
         this.pausedFlag = false;
         const waiters = this.resumeWaiters;
         this.resumeWaiters = [];
@@ -233,10 +259,19 @@ export class Scanner {
         this.mode = null;
         this.probed = 0;
         this.arms = [];
+        this.lastDetectStart = null;
         this.visited.clear();
         this.foundMap.clear();
         this.neterrStreak = 0;
         this.probeTimestamps = [];
+    }
+
+    /** Эпоха библиотеки: инкремент при сбросе — фронт вешает её на URL превью,
+     *  чтобы браузерный кэш не показывал картинки прошлой библиотеки. */
+    private epochValue = 0;
+
+    epoch(): number {
+        return this.epochValue;
     }
 
     /** Сериализация для персистентности (M3). */
@@ -304,6 +339,7 @@ export class Scanner {
         this.probed = 0;
         this.neterrStreak = 0;
         this.arms = [];
+        this.lastDetectStart = null;
         this.visited.clear();
         this.probeTimestamps = [];
         const conn = this.connection;
@@ -314,9 +350,8 @@ export class Scanner {
         });
     }
 
-    /** Разведка блока start..start+C.DETECT_BLOCK-1. */
-    private async detect(gen: number, conn: TwonkyConnection): Promise<void> {
-        const startN = conn.startNumber;
+    /** Разведка блока start..start+C.DETECT_BLOCK-1 (startN — точка старта). */
+    private async detect(gen: number, conn: TwonkyConnection, startN: number = conn.startNumber): Promise<void> {
         const foundNumbers: number[] = [];
         let anyResponse = false;
 
@@ -329,6 +364,9 @@ export class Scanner {
                 if (!this.visited.has(n)) {
                     this.visited.add(n);
                     items.push(n);
+                } else if (this.foundMap.has(n)) {
+                    // Уже найдено (например, в фазе поиска) — учитываем как якорь без пробы.
+                    foundNumbers.push(n);
                 }
             }
             const results = await Promise.all(items.map((n) => this.sem.run(() => this.prober.probe(n))));
@@ -360,8 +398,10 @@ export class Scanner {
         if (!(await this.waitGate(gen))) return;
 
         if (!anyResponse) {
-            this.status = 'error';
-            this.reason = 'Сервер не отвечает: в блоке разведки нет ни одного HTTP-ответа';
+            // Сервер перестал отвечать посреди разведки: пауза вместо ошибки —
+            // «Продолжить» вернётся к этой же точке (lastDetectStart).
+            this.pauseNeterr();
+            this.reason = 'Сервер перестал отвечать во время разведки. Продолжите вручную';
             return;
         }
 
@@ -392,14 +432,25 @@ export class Scanner {
             gapMiss: 0,
             resumePos: 0,
             sparseLeft: 0,
+            searchLeft: 0,
         });
         if (mode === 'seq') {
             return [mk(1, startN + C.DETECT_BLOCK, 1), mk(-1, startN - 1, 1)];
         }
-        // delta: якоря = найденные номера (ноль найдено → виртуальный якорь на старте)
-        const list = anchors.length > 0 ? anchors : [startN];
+        if (anchors.length === 0) {
+            // Нулевая разведка: база библиотеки неизвестна — режим поиска блоками
+            // (шаг 1 внутри блока, блоки через C.SEARCH_STRIDE). Первая находка
+            // перезапускает обычную разведку вокруг себя (см. probeBatch).
+            const search = (dir: ArmDir, pos: number, left: number): Arm => ({
+                ...mk(dir, pos, C.STEP_DELTA),
+                phase: 'search',
+                searchLeft: left,
+            });
+            return [search(1, startN, 0), search(-1, startN - 1, C.DETECT_BLOCK)];
+        }
+        // delta: якоря = найденные номера
         const arms: Arm[] = [];
-        for (const a of list) {
+        for (const a of anchors) {
             arms.push(mk(1, a + C.STEP_DELTA, C.STEP_DELTA));
             arms.push(mk(-1, a - C.STEP_DELTA, C.STEP_DELTA));
         }
@@ -433,6 +484,10 @@ export class Scanner {
                     arm.phase = 'sparse';
                     arm.sparseLeft = C.SPARSE_PROBES;
                 }
+            }
+            if (arm.phase === 'search' && arm.missStreak >= C.SEARCH_LIMIT_PROBES) {
+                // Бюджет поиска исчерпан: библиотеки в этом направлении нет.
+                arm.state = 'stopped';
             }
             if (arm.phase === 'gapfill' && arm.gapMiss >= C.MISS_LIMIT) {
                 this.finishGapfill(arm);
@@ -478,6 +533,27 @@ export class Scanner {
                 arm.gapPos -= arm.step * arm.dir;
                 this.visited.add(n);
                 batch.push({ number: n, fromSweep: false, arm });
+            } else if (arm.phase === 'search') {
+                // Поиск базы библиотеки: блоки DETECT_BLOCK подряд номеров
+                // (шаг 1), между блоками сдвиг до C.SEARCH_STRIDE.
+                if (arm.searchLeft <= 0) {
+                    arm.searchLeft = C.DETECT_BLOCK;
+                    // pos уже за концом блока: добираем остаток шага между блоками.
+                    arm.pos += arm.dir * Math.max(0, C.SEARCH_STRIDE - C.DETECT_BLOCK);
+                }
+                while (batch.length < C.PROBE_BATCH && arm.searchLeft > 0) {
+                    const n = arm.pos;
+                    arm.pos += arm.dir;
+                    arm.searchLeft -= 1;
+                    if (outOfRange(n)) {
+                        arm.state = 'stopped';
+                        break;
+                    }
+                    if (this.visited.has(n)) continue;
+                    this.visited.add(n);
+                    batch.push({ number: n, fromSweep: false, arm });
+                }
+                break;
             } else {
                 // sparse
                 if (arm.sparseLeft <= 0) break;
@@ -529,6 +605,13 @@ export class Scanner {
 
             if (res.kind === 'exists' && res.media !== null) {
                 this.handleFound(arm, it.number, res, newFound);
+                if (arm.phase === 'search') {
+                    // Первая находка поиска: рука завершается, разведка перезапустится
+                    // вокруг минимального найденного номера (seq/delta определится заново).
+                    arm.state = 'stopped';
+                    this.searchRelaunch =
+                        this.searchRelaunch === null ? it.number : Math.min(this.searchRelaunch, it.number);
+                }
                 continue;
             }
 
@@ -536,12 +619,42 @@ export class Scanner {
             if (!it.fromSweep) {
                 if (arm.phase === 'scan') arm.missStreak += 1;
                 else if (arm.phase === 'gapfill') arm.gapMiss += 1;
+                else if (arm.phase === 'search') arm.missStreak += 1;
                 // sparse: отдельного счётчика нет — только исчерпание sparseLeft.
             }
         }
 
         if (newFound.length > 0) this.emitFound(newFound);
         if (neterrNow && this.neterrStreak >= C.NETERR_PAUSE) this.pauseNeterr();
+        if (this.searchRelaunch !== null) {
+            const n = this.searchRelaunch;
+            this.searchRelaunch = null;
+            this.relaunchDetect(n);
+        }
+    }
+
+    /** Номер для перезапуска разведки после находки в фазе search. */
+    private searchRelaunch: number | null = null;
+
+    /** Перезапуск разведки блока вокруг найденного номера (выход из режима поиска). */
+    private relaunchDetect(startN: number): void {
+        const conn = this.connection;
+        if (conn === null) return;
+        this.generation += 1;
+        const gen = this.generation;
+        const waiters = this.resumeWaiters;
+        this.resumeWaiters = [];
+        for (const w of waiters) w();
+        for (const a of this.arms) a.state = 'stopped';
+        this.arms = [];
+        this.mode = null;
+        this.status = 'detecting';
+        this.neterrStreak = 0;
+        this.lastDetectStart = startN;
+        void this.detect(gen, conn, Math.max(0, startN)).catch((err: unknown) => {
+            this.status = 'error';
+            this.reason = `Ошибка разведки: ${err instanceof Error ? err.message : String(err)}`;
+        });
     }
 
     /** Обработка находки: регистрация + фазовые переходы руки. */
@@ -565,7 +678,7 @@ export class Scanner {
             arm.jumpsDone = 0;
         }
 
-        if (arm.foundSinceSweep >= C.DENSE_SWEEP_EVERY) {
+        if (arm.phase !== 'search' && arm.foundSinceSweep >= C.DENSE_SWEEP_EVERY) {
             this.enqueueSweep(arm, n);
             arm.foundSinceSweep = 0;
         }

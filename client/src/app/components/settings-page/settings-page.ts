@@ -1,6 +1,7 @@
 import { Component, computed, inject, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { ApiService, type ConfigSnapshot, type Settings } from '../../core/services/api';
+import { FilesService } from '../../core/services/files';
 import { StateStore } from '../../core/services/state-store';
 import { ToastService } from '../../core/services/toast';
 import { CONFIG_GROUPS } from '../../core/config-meta';
@@ -16,6 +17,7 @@ type FormModel = Record<string, string>;
 })
 export class SettingsPage {
     private readonly api = inject(ApiService);
+    private readonly files = inject(FilesService);
     private readonly store = inject(StateStore);
     private readonly toast = inject(ToastService);
 
@@ -153,6 +155,11 @@ export class SettingsPage {
             await this.api.stateReset(this.resetScan(), this.resetQueue());
             this.toast.show('success', 'Состояние сброшено');
             this.confirmReset.set(false);
+            // Галерея и скан-панель — сразу в актуальное состояние (эпоха сменит URL превью).
+            this.store.clearSelection();
+            this.store.newFound.set(0);
+            this.store.applyScan(await this.api.scanStatus());
+            await this.files.loadPage(1);
         } catch (err: unknown) {
             this.toast.show('error', err instanceof Error ? err.message : String(err));
         }

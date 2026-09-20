@@ -14,17 +14,25 @@
     <span>
         Найдено: <b>{{ fmt(storeRef.scan().found) }}</b>
         @if (storeRef.scan().stats; as s) {
-            <span class="of" [title]="'фото ' + s.pictures + ', видео ' + s.videos + ' (по статистике сервера)'">
+            <span class="of" [title]="'по статистике сервера'">
                 из {{ fmt(s.pictures + s.videos) }}
             </span>
         }
     </span>
+    @if (storeRef.scan().stats; as s) {
+        <span class="of" [title]="'фото: найдено ' + storeRef.scan().foundImages + ' из ' + s.pictures + ' по статистике сервера'">
+            фото {{ storeRef.scan().foundImages }}/{{ s.pictures }}
+        </span>
+        <span class="of" [title]="'видео: найдено ' + storeRef.scan().foundVideos + ' из ' + s.videos + ' по статистике сервера'">
+            видео {{ storeRef.scan().foundVideos }}/{{ s.videos }}
+        </span>
+    }
     <span title="Проб в секунду">eps: <b>{{ fmt(storeRef.scan().eps) }}</b></span>
 </div>
 
 @if (storeRef.scan().arms.length > 0) {
     <div class="arms mono">
-        @for (arm of storeRef.scan().arms; track arm.dir) {
+            @for (arm of storeRef.scan().arms; track $index) {
             <span [title]="'фаза ' + arm.phase + ', найдено ' + arm.foundCount">
                 {{ arm.dir === 1 ? '→' : '←' }} {{ arm.pos }}
             </span>

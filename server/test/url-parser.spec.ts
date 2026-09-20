@@ -132,3 +132,17 @@ test('fileUrl и thumbUrl строятся от baseUrl', () => {
     assert.equal(fileUrl(c, 7321), 'http://host:9000/disk/O0$2$20I7321');
     assert.equal(thumbUrl(c, 7321, 200, 160), 'http://host:9000/disk/O0$2$20I7321?scale=200x160');
 });
+
+test('ссылка на файл с расширением и подпапкой: номер из имени, не дефолт', () => {
+    const res = parseConnectionUrl('http://host:9000/disk/DLNA-PNJPEG_TN-FLAGS00d00000/O0$2$20I131100.JPG');
+    assert.equal(res.ok, true);
+    if (!res.ok) return;
+    const c = res.connection;
+    assert.equal(c.startNumber, 131100);
+    assert.equal(c.prefix, 'O0$2$20I');
+    assert.equal(c.basePath, '/disk/DLNA-PNJPEG_TN-FLAGS00d00000/');
+    // baseUrl НЕ должен содержать сегмент файла — иначе Twonky отвечает
+    // одной и той же картинкой на любой номер во «вложенном» URL.
+    assert.equal(c.baseUrl, 'http://host:9000/disk/DLNA-PNJPEG_TN-FLAGS00d00000/O0$2$20I');
+    assert.equal(fileUrl(c, 131356), 'http://host:9000/disk/DLNA-PNJPEG_TN-FLAGS00d00000/O0$2$20I131356');
+});

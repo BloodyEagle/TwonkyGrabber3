@@ -43,6 +43,28 @@ class NetErrProber implements Prober {
     }
 }
 
+/** Флапающая сеть: до cut1 отвечает, [cut1..cut2) — обвал (neterr), после — снова отвечает. */
+class FlakyProber implements Prober {
+    private count = 0;
+
+    constructor(
+        private readonly exists: (n: number) => boolean,
+        private readonly cut1: number,
+        private readonly cut2: number,
+    ) {}
+
+    async probe(n: number): Promise<ProbeResult> {
+        this.count += 1;
+        if (this.count >= this.cut1 && this.count < this.cut2) {
+            return { kind: 'neterr', media: null, contentType: null, size: null, detail: 'обвал сети' };
+        }
+        if (this.exists(n)) {
+            return { kind: 'exists', media: 'image', contentType: 'image/jpeg', size: 1024, detail: 'мок' };
+        }
+        return { kind: 'missing', media: null, contentType: null, size: null, detail: 'мок' };
+    }
+}
+
 async function waitStatus(scanner: Scanner, expected: string[], timeoutMs = 10_000): Promise<void> {
     const t0 = Date.now();
     while (!expected.includes(scanner.progress().status)) {
@@ -123,16 +145,18 @@ test('delta: единственная находка в блоке → якор�
     assert.ok(prober.calls.includes(4744));
 });
 
-test('delta: ноль найдено в блоке → виртуальный якорь на старте', async () => {
+test('delta: ноль найдено в блоке → режим поиска (руки останавливаются по бюджету)', async () => {
     const prober = new MockProber(() => false);
     const scanner = new Scanner(prober);
     scanner.start(conn());
-    await waitStatus(scanner, ['done']);
+    await waitStatus(scanner, ['done'], 60_000);
 
     const p = scanner.progress();
     assert.equal(p.mode, 'delta');
     assert.equal(p.arms.length, 2);
     assert.equal(p.found, 0);
+    // Обе руки остановлены (бюджет поиска/границы), не зависли.
+    assert.ok(p.arms.every((a) => a.state === 'stopped'));
 });
 
 test('gapfill: находка после прыжка заполняет разрыв в обратную сторону и продолжает скан', async () => {
@@ -243,4 +267,39 @@ test('статистика недоступна (null) — скан идёт к�
     scanner.start(conn());
     await waitStatus(scanner, ['done']);
     assert.equal(scanner.progress().found, 256);
+});
+
+test('поиск: обвал сети после находки → пауза → продолжить от находки', async () => {
+    // Библиотека 130844..131612 (шаг 256). Обвал сети начинается после того, как
+    // поиск нашёл первый файл и перезапустил разведку (кут попадает на detect-блок).
+    // Суммарный счётчик проб к моменту находки: 256 (разведка) + ~5000 (рука вниз до нуля)
+    // + ~125 600 (рука вперёд до 130843) ≈ 130 845. Обвал ловит relaunch-разведку:
+    // первый же батч даёт 16 neterr подряд → пауза (~130 916). Обвал короткий —
+    // после resume сервер снова отвечает.
+    const prober = new FlakyProber((n) => n >= 130844 && n <= 131612 && (n - 130844) % 256 === 0, 130_900, 130_920);
+    const scanner = new Scanner(prober);
+    scanner.start(conn());
+    await waitStatus(scanner, ['paused'], 60_000);
+    assert.equal(scanner.getFound(130844) !== null, true, 'находка поиска должна быть зарегистрирована до паузы');
+
+    scanner.resume();
+    await waitStatus(scanner, ['done'], 60_000);
+    assert.equal(scanner.progress().found, 4);
+    assert.ok(scanner.getFound(131612) !== null);
+});
+
+test('поиск: нулевая разведка → блоки поиска → перезапуск вокруг находки', async () => {
+    // Библиотека далеко от старта 5000: 130844..131612 с шагом 256 (как у реального сервера).
+    const prober = new MockProber((n) => n >= 130844 && n <= 131612 && (n - 130844) % 256 === 0);
+    const scanner = new Scanner(prober);
+    scanner.start(conn());
+    await waitStatus(scanner, ['done'], 60_000);
+
+    const p = scanner.progress();
+    assert.equal(p.mode, 'delta');
+    assert.equal(p.found, 4); // 130844, 131100, 131356, 131612
+    assert.ok(scanner.getFound(130844) !== null);
+    assert.ok(scanner.getFound(131612) !== null);
+    // Соседние с границами не «найдены».
+    assert.ok(scanner.getFound(131868) === null);
 });
