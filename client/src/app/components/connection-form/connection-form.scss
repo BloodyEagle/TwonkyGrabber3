@@ -1,0 +1,27 @@
+:host {
+    display: flex;
+    align-items: flex-end;
+    gap: 10px;
+}
+
+.grow {
+    flex: 1;
+}
+
+.chip {
+    display: inline-flex;
+    align-items: center;
+    height: 32px;
+    padding: 0 10px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg-inset);
+    color: var(--text-dim);
+    font-size: 12px;
+    white-space: nowrap;
+}
+
+.chip.ok {
+    color: var(--success);
+    border-color: var(--success);
+}

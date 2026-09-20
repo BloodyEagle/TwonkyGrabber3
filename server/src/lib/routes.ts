@@ -6,23 +6,9 @@
  */
 import { Router } from 'express';
 import type { Request, Response } from 'express';
-import {
-    FILES_PAGE_DEFAULT,
-    FILES_PAGE_SIZE_DEFAULT,
-    FILES_PAGE_SIZE_MAX,
-    QUEUE_PAGE_DEFAULT,
-    QUEUE_PAGE_SIZE_DEFAULT,
-    QUEUE_PAGE_SIZE_MAX,
-    SSE_FOUND_FLUSH_MS,
-    SSE_HEARTBEAT_MS,
-    SSE_QUEUE_MS,
-    SSE_SCAN_MS,
-    PROBE_TIMEOUT,
-    THUMB_CACHE_MAX_AGE,
-    THUMB_MAX,
-    THUMB_MIN,
-} from '../config';
+import { C, applyConfigPatch, configSnapshot } from '../config';
 import { checkAvailable } from './probe';
+import { fetchServerStats } from './server-stats';
 import { nodeTransport } from './http';
 import { fileUrl, parseConnectionUrl, thumbUrl } from './url-parser';
 import type { Scanner } from './scanner';
@@ -51,7 +37,7 @@ class SseHub {
         this.timers.push(
             setInterval(() => {
                 if (this.clients.size > 0) this.sendAll('scan', scanner.progress());
-            }, SSE_SCAN_MS),
+            }, C.SSE_SCAN_MS),
         );
 
         this.timers.push(
@@ -61,19 +47,19 @@ class SseHub {
                     this.foundBuffer = [];
                     this.sendAll('found', batch);
                 }
-            }, SSE_FOUND_FLUSH_MS),
+            }, C.SSE_FOUND_FLUSH_MS),
         );
 
         this.timers.push(
             setInterval(() => {
                 if (this.clients.size > 0) this.sendAll('queue', downloader.state());
-            }, SSE_QUEUE_MS),
+            }, C.SSE_QUEUE_MS),
         );
 
         this.timers.push(
             setInterval(() => {
                 for (const res of this.clients) res.write(': hb\n\n');
-            }, SSE_HEARTBEAT_MS),
+            }, C.SSE_HEARTBEAT_MS),
         );
     }
 
@@ -147,6 +133,10 @@ export function createApiRouter(deps: ApiDeps): Router {
                 return;
             }
             scanner.setConnection(conn);
+            // Точные счётчики (/rpc/info_status) — для досрочной остановки скана.
+            void fetchServerStats(conn).then((stats) => {
+                scanner.setServerTotals(stats);
+            });
             res.json({ ok: true, connection: conn, exists: true });
         });
     });
@@ -174,8 +164,8 @@ export function createApiRouter(deps: ApiDeps): Router {
 
     // Список найденных файлов: пагинация, фильтр по типу, сортировка по номеру.
     router.get('/files', (req, res) => {
-        const page = queryToInt(req.query.page, FILES_PAGE_DEFAULT);
-        const size = queryToInt(req.query.size, FILES_PAGE_SIZE_DEFAULT);
+        const page = queryToInt(req.query.page, C.FILES_PAGE_DEFAULT);
+        const size = queryToInt(req.query.size, C.FILES_PAGE_SIZE_DEFAULT);
         const sort = queryToString(req.query.sort) ?? 'asc';
         const type = queryToString(req.query.type) ?? 'all';
         if (page === null || page < 1) {
@@ -194,7 +184,7 @@ export function createApiRouter(deps: ApiDeps): Router {
             res.status(400).json({ ok: false, reason: 'type может быть только all, image или video' });
             return;
         }
-        const clampedSize = Math.min(size, FILES_PAGE_SIZE_MAX);
+        const clampedSize = Math.min(size, C.FILES_PAGE_SIZE_MAX);
         const all = scanner.foundList();
         const filtered = type === 'all' ? all : all.filter((f) => f.kind === type);
         if (sort === 'desc') filtered.reverse();
@@ -214,7 +204,7 @@ export function createApiRouter(deps: ApiDeps): Router {
      * вызывающий решает: fallback на оригинал или 404. Сетевая ошибка — исключение.
      */
     const sendUpstreamImage = async (url: string, res: Response): Promise<boolean> => {
-        const upstream = await nodeTransport.stream(url, { headers: {}, idleTimeoutMs: PROBE_TIMEOUT });
+        const upstream = await nodeTransport.stream(url, { headers: {}, idleTimeoutMs: C.PROBE_TIMEOUT });
         const contentType = String(upstream.headers['content-type'] ?? '');
         if (upstream.status !== 200 || !contentType.startsWith('image/')) {
             upstream.stream.destroy();
@@ -224,7 +214,7 @@ export function createApiRouter(deps: ApiDeps): Router {
         res.set('Content-Type', contentType);
         const length = upstream.headers['content-length'];
         if (length !== undefined) res.set('Content-Length', String(length));
-        res.set('Cache-Control', `public, max-age=${THUMB_CACHE_MAX_AGE}`);
+        res.set('Cache-Control', `public, max-age=${C.THUMB_CACHE_MAX_AGE}`);
         // Обрыв клиента → уничтожаем запрос к апстриму (план, п.7).
         res.on('close', () => {
             upstream.stream.destroy();
@@ -270,7 +260,7 @@ export function createApiRouter(deps: ApiDeps): Router {
             res.status(400).json({ ok: false, reason: 'Параметры w и h обязательны' });
             return;
         }
-        const clamp = (v: number): number => Math.min(THUMB_MAX, Math.max(THUMB_MIN, Math.round(v)));
+        const clamp = (v: number): number => Math.min(C.THUMB_MAX, Math.max(C.THUMB_MIN, Math.round(v)));
 
         void (async () => {
             try {
@@ -341,17 +331,35 @@ export function createApiRouter(deps: ApiDeps): Router {
     });
 
     router.get('/queue', (req, res) => {
-        const page = queryToInt(req.query.page, QUEUE_PAGE_DEFAULT);
-        const size = queryToInt(req.query.size, QUEUE_PAGE_SIZE_DEFAULT);
+        const page = queryToInt(req.query.page, C.QUEUE_PAGE_DEFAULT);
+        const size = queryToInt(req.query.size, C.QUEUE_PAGE_SIZE_DEFAULT);
         if (page === null || page < 1 || size === null || size < 1) {
             res.status(400).json({ ok: false, reason: 'Параметры page и size должны быть целыми не меньше 1' });
             return;
         }
-        const clamped = Math.min(size, QUEUE_PAGE_SIZE_MAX);
+        const clamped = Math.min(size, C.QUEUE_PAGE_SIZE_MAX);
         res.json({ ...downloader.state(), ...downloader.itemsPage(page, clamped) });
     });
 
     // --- Настройки и сброс состояния ---
+
+    router.get('/config', (_req, res) => {
+        res.json(configSnapshot());
+    });
+
+    router.post('/config', (req, res) => {
+        const body = req.body;
+        if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+            res.status(400).json({ ok: false, reason: 'Ожидается объект с параметрами' });
+            return;
+        }
+        const errors = applyConfigPatch(body as Record<string, unknown>);
+        if (errors.length > 0) {
+            res.status(400).json({ ok: false, reason: errors.join('; '), errors });
+            return;
+        }
+        res.json({ ok: true, ...configSnapshot() });
+    });
 
     router.get('/settings', (_req, res) => {
         res.json(downloader.settings());

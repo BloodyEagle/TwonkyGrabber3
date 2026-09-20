@@ -1,0 +1,108 @@
+<div class="page">
+    <header>
+        <button class="btn btn-secondary" type="button" (click)="back()">← Назад</button>
+        <h2>Настройки</h2>
+    </header>
+
+    @if (settings(); as s) {
+        <section class="panel">
+            <h3 class="panel-title">Очередь</h3>
+            <label class="check">
+                <input type="checkbox" [checked]="s.autoAll" (change)="toggleAutoAll($event)" />
+                «Скачать всё» — автодобавление новых находок
+            </label>
+            <div class="threads">
+                <label class="check">
+                    <input type="checkbox" [checked]="s.threadsMode === 'auto'" (change)="modeChange($event)" />
+                    авто-потоки
+                </label>
+                @if (s.threadsMode === 'manual') {
+                    <label class="slider">
+                        <input type="range" min="1" max="32" [ngModel]="s.threadsValue" (change)="threadsChange($event)" />
+                        <span class="tnum">{{ s.threadsValue }}</span>
+                    </label>
+                }
+            </div>
+            <p class="dim">Папка загрузок: <span class="mono">{{ s.downloadDir }}</span></p>
+        </section>
+    }
+
+    <section class="panel">
+        <div class="config-head">
+            <h3 class="panel-title">Параметры сервера</h3>
+            <div class="config-actions">
+                <button class="btn btn-secondary" type="button" (click)="resetDefaults()">Сбросить к default</button>
+                <button class="btn btn-primary" type="button" (click)="save()">Сохранить</button>
+            </div>
+        </div>
+
+        @if (snapshot(); as snap) {
+            <p class="dim env mono">
+                env (только чтение): PORT={{ snap.env.PORT }} · DOWNLOAD_DIR={{ snap.env.DOWNLOAD_DIR }} · STATE_FILE={{ snap.env.STATE_FILE }}
+            </p>
+
+            <div class="groups">
+                @for (group of groups; track group.title) {
+                    <div class="group">
+                        <h4>{{ group.title }}</h4>
+                        <div class="fields">
+                            @for (param of group.params; track param.key) {
+                                <label class="cfg-field" [class.changed]="!isDefault(param.key)">
+                                    <span class="lbl" [title]="param.key">{{ param.label }}</span>
+                                    <input
+                                        class="mono"
+                                        type="text"
+                                        [value]="form()[param.key]"
+                                        (input)="setField(param.key, $any($event.target).value)"
+                                    />
+                                        @if (param.hint !== undefined) {
+                                            <span class="hint">{{ param.hint }}</span>
+                                        }
+                                        @if (!isDefault(param.key)) {
+                                            <span class="def mono" [title]="'по умолчанию: ' + defaultValue(param.key)">
+                                                def: {{ defaultValue(param.key) }}
+                                            </span>
+                                        }
+                                </label>
+                            }
+                        </div>
+                    </div>
+                } @empty {
+                    <p class="dim">Группы не заданы</p>
+                }
+
+                <div class="group">
+                    <h4>Размеры превью</h4>
+                    <div class="thumb-sizes">
+                        @for (key of thumbKeys(); track key) {
+                            <label class="thumb-cell">
+                                <span class="lbl">{{ key }}</span>
+                                <input class="mono" type="text" inputmode="numeric" [value]="thumbW()[key]" (input)="setThumbW(key, $any($event.target).value)" aria-label="{{ key }} ширина" />
+                                <span class="x">×</span>
+                                <input class="mono" type="text" inputmode="numeric" [value]="thumbH()[key]" (input)="setThumbH(key, $any($event.target).value)" aria-label="{{ key }} высота" />
+                            </label>
+                        }
+                    </div>
+                </div>
+            </div>
+        } @else {
+            <div class="skeletons">
+                @for (i of [1, 2, 3, 4, 5, 6]; track i) {
+                    <div class="sk"></div>
+                }
+            </div>
+        }
+    </section>
+
+    <section class="panel">
+        <h3 class="panel-title">Сброс состояния</h3>
+        <div class="reset">
+            <label class="check"><input type="checkbox" [ngModel]="resetScan()" (ngModelChange)="resetScan.set($event)" /> сбросить скан</label>
+            <label class="check"><input type="checkbox" [ngModel]="resetQueue()" (ngModelChange)="resetQueue.set($event)" /> сбросить очередь</label>
+            <button class="btn btn-danger" type="button" (click)="doReset()">
+                {{ confirmReset() ? 'Точно сбросить?' : 'Сбросить' }}
+            </button>
+        </div>
+        <p class="dim">Скачанные файлы на диске не удаляются.</p>
+    </section>
+</div>

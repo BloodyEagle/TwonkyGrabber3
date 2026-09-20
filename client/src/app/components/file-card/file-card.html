@@ -1,0 +1,57 @@
+<div class="card" [class.selected]="selected()">
+    <div class="img-zone" [style.aspect-ratio]="'5 / 4'">
+        <a class="open-original" [href]="originalHref()" target="_blank" rel="noopener" title="Открыть оригинал"></a>
+        @if (!failed()) {
+            <img
+                [src]="thumbSrc()"
+                [alt]="file().name"
+                loading="lazy"
+                (load)="onLoad($event)"
+                (error)="onError()"
+                [class.visible]="loaded()"
+            />
+        } @else {
+            <div class="stub">
+                @if (file().kind === 'video') {
+                    <svg width="20" height="20" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                        <rect x="1" y="3" width="14" height="10" rx="2" stroke="currentColor" />
+                        <path d="M6.5 6l4 2-4 2z" fill="currentColor" />
+                    </svg>
+                    <span>видео</span>
+                } @else {
+                    <svg width="20" height="20" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                        <rect x="1.5" y="3" width="13" height="10" rx="2" stroke="currentColor" />
+                        <circle cx="5.5" cy="6.5" r="1.2" fill="currentColor" />
+                        <path d="M2 11l4-3 3 2 3-3 2 2" stroke="currentColor" />
+                    </svg>
+                    <span>нет превью</span>
+                }
+                <span class="mono num">{{ file().number }}</span>
+            </div>
+        }
+        @if (!loaded() && !failed()) {
+            <div class="shimmer" aria-hidden="true"></div>
+        }
+        @if (oversized()) {
+            <span class="oversized-flag" [title]="`Получен оригинал ${realDims()} вместо превью`"></span>
+        }
+        @if (file().kind === 'video' && loaded()) {
+            <span class="play" aria-hidden="true">
+                <svg width="12" height="12" viewBox="0 0 16 16"><path d="M4 2l9 6-9 6z" fill="currentColor" /></svg>
+            </span>
+        }
+        <label class="check" title="Выбрать (Shift — диапазон)">
+            <input
+                type="checkbox"
+                [checked]="selected()"
+                (click)="onShiftClick($event)"
+                (change)="$event.preventDefault()"
+            />
+        </label>
+    </div>
+    <div class="info" [title]="file().name + ' · ' + file().contentType">
+        <span class="mono num">{{ file().number }}</span>
+        <span class="kind">{{ file().kind === 'video' ? 'видео' : 'фото' }}</span>
+        <span class="size tnum">{{ sizeLabel() }}</span>
+    </div>
+</div>

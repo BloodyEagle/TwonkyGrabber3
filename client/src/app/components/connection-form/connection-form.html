@@ -1,0 +1,19 @@
+<div class="field grow">
+    <label for="conn-url">Адрес сервера Twonky</label>
+    <input
+        id="conn-url"
+        type="text"
+        class="mono"
+        placeholder="http://192.168.1.10:9000/disk/O0$2$20I5000"
+        [ngModel]="url()"
+        (ngModelChange)="url.set($event)"
+        (keyup.enter)="connect()"
+        [disabled]="busy()"
+    />
+</div>
+<button class="btn btn-primary" type="button" (click)="connect()" [disabled]="busy() || url().trim() === ''">
+    @if (busy()) { Подключение… } @else { Подключить }
+</button>
+@if (store.connected()) {
+    <span class="chip ok mono">{{ store.connection()?.host }}:{{ store.connection()?.port }}</span>
+}

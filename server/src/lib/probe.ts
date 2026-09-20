@@ -7,7 +7,7 @@
  *
  * Зависимость HttpTransport внедряется — в юнит-тестах сеть подменяется моком.
  */
-import {PROBE_RETRIES, PROBE_RETRY_DELAYS_MS, PROBE_TIMEOUT} from '../config';
+import { C } from '../config';
 import type {FileKind} from './types';
 import {NetworkError, nodeTransport, sleep} from './http';
 import type {HttpMetaResponse, HttpMetaTransport} from './http';
@@ -98,13 +98,13 @@ function classify(res: HttpMetaResponse, via: string): ProbeResult {
 /** Одна попытка: HEAD, при 405/501 — GET с Range: bytes=0-0. */
 async function probeOnce(url: string, transport: HttpMetaTransport): Promise<ProbeResult> {
     try {
-        const head = await transport.meta(url, {method: 'HEAD', timeoutMs: PROBE_TIMEOUT});
+        const head = await transport.meta(url, {method: 'HEAD', timeoutMs: C.PROBE_TIMEOUT});
         if (head.status === 405 || head.status === 501) {
             // HEAD не поддерживается старыми прошивками.
             const get = await transport.meta(url, {
                 method: 'GET',
                 headers: {Range: 'bytes=0-0'},
-                timeoutMs: PROBE_TIMEOUT,
+                timeoutMs: C.PROBE_TIMEOUT,
             });
             return classify(get, `GET Range ${get.status}`);
         }
@@ -116,19 +116,19 @@ async function probeOnce(url: string, transport: HttpMetaTransport): Promise<Pro
 }
 
 /**
- * Проба с ретраями: сетевые ошибки повторяются PROBE_RETRIES раз
- * с задержками PROBE_RETRY_DELAYS_MS (400/800 мс).
+ * Проба с ретраями: сетевые ошибки повторяются C.PROBE_RETRIES раз
+ * с задержками C.PROBE_RETRY_DELAYS_MS (400/800 мс).
  */
 export async function probeUrl(url: string, deps: ProbeDeps = {transport: nodeTransport}): Promise<ProbeResult> {
     const {transport} = deps;
     const doSleep = deps.sleep ?? sleep;
 
     let last: ProbeResult = {kind: 'neterr', media: null, contentType: null, size: null, detail: 'нет попыток'};
-    for (let attempt = 0; attempt <= PROBE_RETRIES; attempt++) {
+    for (let attempt = 0; attempt <= C.PROBE_RETRIES; attempt++) {
         if (attempt > 0) {
             // Индекс задержки с обрезкой по длине массива (защита от изменений конфига).
-            const idx = Math.min(attempt - 1, PROBE_RETRY_DELAYS_MS.length - 1);
-            const delay = PROBE_RETRY_DELAYS_MS[idx];
+            const idx = Math.min(attempt - 1, C.PROBE_RETRY_DELAYS_MS.length - 1);
+            const delay = C.PROBE_RETRY_DELAYS_MS[idx];
             if (delay !== undefined) await doSleep(delay);
         }
         last = await probeOnce(url, transport);
@@ -143,7 +143,7 @@ export async function probeUrl(url: string, deps: ProbeDeps = {transport: nodeTr
  */
 export async function checkAvailable(url: string, transport: HttpMetaTransport = nodeTransport): Promise<boolean> {
     try {
-        await transport.meta(url, {method: 'HEAD', timeoutMs: PROBE_TIMEOUT});
+        await transport.meta(url, {method: 'HEAD', timeoutMs: C.PROBE_TIMEOUT});
         return true;
     } catch {
         // На старых прошивках HEAD может падать на сетевом уровне — пробуем GET с Range.
@@ -151,7 +151,7 @@ export async function checkAvailable(url: string, transport: HttpMetaTransport =
             await transport.meta(url, {
                 method: 'GET',
                 headers: {Range: 'bytes=0-0'},
-                timeoutMs: PROBE_TIMEOUT,
+                timeoutMs: C.PROBE_TIMEOUT,
             });
             return true;
         } catch {

@@ -7,25 +7,13 @@
  *  - файл: свежий HEAD → имя (tail + ext) → дубликаты: тот же размер = skip,
  *    другой размер = суффикс _1.._N → качаем в <имя>.part с докачкой Range,
  *    сверяем итоговый размер → rename;
- *  - авто-потоки: каждые DL_ADJUST_MS скорость на поток ≥ DL_SPEED_UP → target+1
- *    (строго по одному), ≤ DL_SPEED_DOWN или серия отказов → target−1;
+ *  - авто-потоки: каждые C.DL_ADJUST_MS скорость на поток ≥ C.DL_SPEED_UP → target+1
+ *    (строго по одному), ≤ C.DL_SPEED_DOWN или серия отказов → target−1;
  *  - лишние воркеры выходят после завершения текущего файла.
  *
  * Зависимости внедряются (DownloaderDeps) — сеть в юнит-тестах запрещена.
  */
-import {
-    DL_ADJUST_MS,
-    DL_FAILS_THRESHOLD,
-    DL_MAX_THREADS,
-    DL_MIN_THREADS,
-    DL_RETRIES,
-    DL_RETRY_DELAYS_MS,
-    DL_SPEED_DOWN,
-    DL_SPEED_UP,
-    DL_START_THREADS,
-    NAME_SUFFIX_LIMIT,
-    PROBE_TIMEOUT,
-} from '../config';
+import { C } from '../config';
 import { nodeTransport } from './http';
 import type { HttpStreamOptions, HttpStreamResponse } from './http';
 import { buildFileName } from './mime';
@@ -75,7 +63,7 @@ export async function resolveSaveTarget(
     // Расширение с точкой — всё, что в name после baseName.
     const ext = name.substring(baseName.length);
     const { join } = await import('node:path');
-    for (let k = 0; k <= NAME_SUFFIX_LIMIT; k += 1) {
+    for (let k = 0; k <= C.NAME_SUFFIX_LIMIT; k += 1) {
         const fileName = k === 0 ? name : `${baseName}_${k}${ext}`;
         const existing = await sizeOf(join(downloadDir, fileName));
         if (existing === null) {
@@ -85,7 +73,7 @@ export async function resolveSaveTarget(
             return { action: 'skip', savedAs: fileName, note: 'уже скачан' };
         }
     }
-    return { action: 'fail', error: `нет свободного имени: превышен предел суффиксов _1.._${NAME_SUFFIX_LIMIT}` };
+    return { action: 'fail', error: `нет свободного имени: превышен предел суффиксов _1.._${C.NAME_SUFFIX_LIMIT}` };
 }
 
 /** Персистентное состояние очереди (план, п.6). */
@@ -99,7 +87,7 @@ export interface PersistedQueueState {
 }
 
 function clampThreads(value: number): number {
-    return Math.min(DL_MAX_THREADS, Math.max(DL_MIN_THREADS, value));
+    return Math.min(C.DL_MAX_THREADS, Math.max(C.DL_MIN_THREADS, value));
 }
 
 function itemView(item: QueueItem): QueueItemView {
@@ -124,9 +112,9 @@ export class Downloader {
     /** Порядок добавления (FIFO выдачи pending). */
     private readonly order: number[] = [];
     private live = 0;
-    private target = DL_START_THREADS;
+    private target = C.DL_START_THREADS;
     private threadsMode: ThreadsMode = 'auto';
-    private manual = DL_START_THREADS;
+    private manual = C.DL_START_THREADS;
     private autoAllFlag = false;
     private pausedFlag = false;
     /** Скорость последнего интервала подстройки, байт/с (для фронта). */
@@ -144,7 +132,7 @@ export class Downloader {
         this.adjustT0 = this.now();
         this.adjustTimer = setInterval(() => {
             void this.adjust();
-        }, DL_ADJUST_MS);
+        }, C.DL_ADJUST_MS);
     }
 
     private now(): number {
@@ -396,7 +384,7 @@ export class Downloader {
         return null;
     }
 
-    /** Подстройка потоков: раз в DL_ADJUST_MS по скорости и отказам (план, п.6). */
+    /** Подстройка потоков: раз в C.DL_ADJUST_MS по скорости и отказам (план, п.6). */
     private async adjust(): Promise<void> {
         const now = this.now();
         const dtSec = (now - this.adjustT0) / 1000;
@@ -410,11 +398,11 @@ export class Downloader {
 
         if (this.threadsMode !== 'auto') return;
         const speedPerLive = this.speedLast / Math.max(this.live, 1);
-        if (fails > DL_FAILS_THRESHOLD) {
+        if (fails > C.DL_FAILS_THRESHOLD) {
             this.target = clampThreads(this.target - 1);
-        } else if (this.speedLast > 0 && speedPerLive <= DL_SPEED_DOWN) {
+        } else if (this.speedLast > 0 && speedPerLive <= C.DL_SPEED_DOWN) {
             this.target = clampThreads(this.target - 1);
-        } else if (speedPerLive >= DL_SPEED_UP && this.pendingCount() > 0) {
+        } else if (speedPerLive >= C.DL_SPEED_UP && this.pendingCount() > 0) {
             // Рост — строго по одному за интервал.
             this.target = clampThreads(this.target + 1);
         }
@@ -468,17 +456,17 @@ export class Downloader {
         }
     }
 
-    /** Попытки скачивания с докачкой .part; бросает ошибку после DL_RETRIES. */
+    /** Попытки скачивания с докачкой .part; бросает ошибку после C.DL_RETRIES. */
     private async transferWithRetries(item: QueueItem, fileName: string, size: number): Promise<void> {
         const { join } = await import('node:path');
         const partPath = join(this.deps.downloadDir, `${fileName}.part`);
         const finalPath = join(this.deps.downloadDir, fileName);
 
         let lastError: Error = new Error('нет попыток');
-        for (let attempt = 0; attempt <= DL_RETRIES; attempt += 1) {
+        for (let attempt = 0; attempt <= C.DL_RETRIES; attempt += 1) {
             if (attempt > 0) {
-                const idx = Math.min(attempt - 1, DL_RETRY_DELAYS_MS.length - 1);
-                const delay = DL_RETRY_DELAYS_MS[idx];
+                const idx = Math.min(attempt - 1, C.DL_RETRY_DELAYS_MS.length - 1);
+                const delay = C.DL_RETRY_DELAYS_MS[idx];
                 if (delay !== undefined) await this.doSleep(delay);
             }
             try {
@@ -502,7 +490,7 @@ export class Downloader {
                     item.url,
                     {
                         headers: offset > 0 ? { Range: `bytes=${offset}-` } : {},
-                        idleTimeoutMs: PROBE_TIMEOUT,
+                        idleTimeoutMs: C.PROBE_TIMEOUT,
                     },
                 );
                 if (res.status !== 200 && res.status !== 206) {

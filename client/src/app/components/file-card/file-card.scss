@@ -1,0 +1,142 @@
+:host {
+    display: block;
+}
+
+.card {
+    position: relative;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    transition: border-color 150ms ease, transform 150ms ease;
+}
+
+.card:hover {
+    border-color: var(--accent);
+    transform: translateY(-1px);
+}
+
+.card.selected {
+    border: 2px solid var(--accent);
+    background: var(--accent-soft);
+}
+
+.img-zone {
+    position: relative;
+    background: var(--bg-inset);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.img-zone img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    opacity: 0;
+    transition: opacity 150ms ease;
+}
+
+.img-zone img.visible {
+    opacity: 1;
+}
+
+.shimmer {
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(100deg, var(--surface) 40%, var(--surface-hover) 50%, var(--surface) 60%);
+    background-size: 200% 100%;
+    animation: shimmer 1.2s linear infinite;
+}
+
+@keyframes shimmer {
+    to {
+        background-position: -200% 0;
+    }
+}
+
+.stub {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    color: var(--text-mute);
+    font-size: 12px;
+}
+
+.stub .num {
+    font-size: 12px;
+}
+
+.oversized-flag {
+    position: absolute;
+    top: 0;
+    right: 0;
+    width: 0;
+    height: 0;
+    border-top: 18px solid var(--oversized);
+    border-left: 18px solid transparent;
+}
+
+.play {
+    position: absolute;
+    right: 4px;
+    bottom: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: var(--bg-inset);
+    color: var(--text);
+}
+
+.check {
+    position: absolute;
+    top: 4px;
+    left: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    background: var(--bg-inset);
+    border-radius: 6px;
+    cursor: pointer;
+}
+
+.check input {
+    width: 16px;
+    height: 16px;
+    accent-color: var(--accent);
+}
+
+.info {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px;
+    font-size: 12px;
+    color: var(--text-dim);
+}
+
+.info .num {
+    color: var(--text);
+}
+
+.info .size {
+    margin-left: auto;
+}
+
+.open-original {
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+}
+
+.check,
+.oversized-flag,
+.play {
+    z-index: 2;
+}

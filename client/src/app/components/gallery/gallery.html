@@ -1,0 +1,25 @@
+@if (store.filesLoading()) {
+    <div class="grid" [style.grid-template-columns]="'repeat(auto-fill, minmax(' + cardWidth() + 'px, 1fr))'">
+        @for (s of skeletons(); track s) {
+            <div class="skeleton">
+                <div class="img"></div>
+                <div class="line"></div>
+            </div>
+        }
+    </div>
+} @else if (store.files().length === 0) {
+    <div class="empty">
+        <svg width="32" height="32" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <rect x="1.5" y="3" width="13" height="10" rx="2" stroke="currentColor" />
+            <circle cx="5.5" cy="6.5" r="1.2" fill="currentColor" />
+            <path d="M2 11l4-3 3 2 3-3 2 2" stroke="currentColor" />
+        </svg>
+        <p>Файлы не найдены. Подключитесь к серверу и запустите сканирование.</p>
+    </div>
+} @else {
+    <div class="grid" [style.grid-template-columns]="'repeat(auto-fill, minmax(' + cardWidth() + 'px, 1fr))'">
+        @for (file of store.files(); track file.number) {
+            <app-file-card [file]="file" [thumb]="thumb()" />
+        }
+    </div>
+}

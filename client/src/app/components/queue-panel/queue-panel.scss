@@ -1,0 +1,228 @@
+.drawer-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 19;
+    background: rgba(0, 0, 0, 0.5);
+}
+
+.drawer {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 20;
+    width: 380px;
+    max-width: 100vw;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px 14px;
+    background: var(--surface);
+    border-left: 1px solid var(--border);
+    overflow-y: auto;
+}
+
+header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+h3,
+h4 {
+    margin: 0;
+}
+
+h4 {
+    font-size: 13px;
+    color: var(--text-dim);
+}
+
+.counts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    font-size: 12px;
+}
+
+.c {
+    padding: 2px 8px;
+    border-radius: 6px;
+    background: var(--bg-inset);
+    color: var(--text-dim);
+}
+
+.c.active {
+    color: var(--accent);
+}
+
+.c.done {
+    color: var(--success);
+}
+
+.c.failed {
+    color: var(--danger);
+}
+
+.c.skipped {
+    color: var(--text-mute);
+}
+
+.speed-threads {
+    display: flex;
+    gap: 14px;
+    font-size: 13px;
+    color: var(--text-dim);
+}
+
+.threads-ctrl {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.check {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    color: var(--text-dim);
+    cursor: pointer;
+}
+
+.check input {
+    accent-color: var(--accent);
+}
+
+.slider {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    flex: 1;
+}
+
+.slider input[type='range'] {
+    flex: 1;
+    accent-color: var(--accent);
+}
+
+.actions {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.autoall {
+    padding: 6px 10px;
+    border-radius: 6px;
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-size: 12px;
+}
+
+.active-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.active-item {
+    display: grid;
+    grid-template-columns: 1fr 60px 38px;
+    gap: 8px;
+    align-items: center;
+    font-size: 12px;
+}
+
+.name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.progress {
+    height: 6px;
+    border-radius: 3px;
+    background: var(--track);
+    overflow: hidden;
+}
+
+.progress .fill {
+    height: 100%;
+    background: var(--accent);
+}
+
+.pct {
+    text-align: right;
+    color: var(--text-dim);
+}
+
+.list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.list-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.list-head .pager {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 6px;
+    border-radius: 6px;
+    font-size: 12px;
+}
+
+.row:hover {
+    background: var(--surface-hover);
+}
+
+.row .name {
+    flex: 1;
+}
+
+.row .status {
+    color: var(--text-mute);
+}
+
+.row.done .status {
+    color: var(--success);
+}
+
+.row.failed .status,
+.row .error {
+    color: var(--danger);
+}
+
+.row.skipped .status,
+.row .note {
+    color: var(--text-mute);
+}
+
+.row .error {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 140px;
+}
+
+.row .size {
+    color: var(--text-dim);
+}
+
+.empty-list {
+    color: var(--text-mute);
+    font-size: 13px;
+}

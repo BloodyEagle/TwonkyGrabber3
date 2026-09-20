@@ -221,3 +221,26 @@ test('serialize/restore: находки и статус переносятся',
         scanner.foundList().map((f) => f.number),
     );
 });
+
+test('статистика сервера: найдено всё → досрочная остановка', async () => {
+    const prober = new MockProber((n) => n >= 5000 && n <= 5009);
+    const scanner = new Scanner(prober);
+    scanner.setServerTotals({ pictures: 10, videos: 0 });
+    scanner.start(conn());
+    await waitStatus(scanner, ['done']);
+
+    const p = scanner.progress();
+    assert.equal(p.found, 10);
+    assert.match(p.reason ?? '', /статистике сервера/);
+    // За пределы разведочного блока не выходили.
+    assert.ok(!prober.calls.some((n) => n > 5255), 'не должно быть проб за блоком разведки');
+});
+
+test('статистика недоступна (null) — скан идёт как обычно', async () => {
+    const prober = new MockProber((n) => n >= 5000 && n <= 5255);
+    const scanner = new Scanner(prober);
+    scanner.setServerTotals(null);
+    scanner.start(conn());
+    await waitStatus(scanner, ['done']);
+    assert.equal(scanner.progress().found, 256);
+});

@@ -1,0 +1,181 @@
+﻿/* Токены — единственный источник цветов (план, §13.2). Новый hex вне :root — ошибка ревью. */
+:root {
+    --bg: #121418;
+    --bg-inset: #0b0d10;
+    --surface: #1a1e24;
+    --surface-hover: #22272f;
+    --border: #2c323c;
+    --text: #e7eaf0;
+    --text-dim: #9aa3b2;
+    --text-mute: #6b7482;
+    --accent: #4f8cff;
+    --accent-soft: rgba(79, 140, 255, 0.16);
+    --success: #3fb96a;
+    --warning: #e8b13c;
+    --danger: #e5534b;
+    --oversized: #ff8c1a;
+    --track: #262b33;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+html {
+    background: var(--bg); /* никакого «белого мигания» до загрузки стилей */
+}
+
+body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, 'Segoe UI', Roboto, Inter, sans-serif;
+    font-size: 14px;
+    line-height: 1.4;
+}
+
+.mono {
+    font-family: 'Cascadia Mono', 'JetBrains Mono', Consolas, monospace;
+    font-variant-numeric: tabular-nums;
+}
+
+.tnum {
+    font-variant-numeric: tabular-nums;
+}
+
+/* Тёмный скроллбар */
+* {
+    scrollbar-color: var(--border) transparent;
+}
+
+::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 6px;
+}
+
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+/* Общие кнопки (§13.5) */
+.btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 32px;
+    padding: 0 12px;
+    border-radius: 6px;
+    border: 1px solid transparent;
+    font: inherit;
+    cursor: pointer;
+    transition: background-color 150ms ease, border-color 150ms ease, opacity 150ms ease;
+}
+
+.btn[disabled] {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.btn:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+}
+
+.btn-primary {
+    background: var(--accent);
+    color: #0e1116;
+    font-weight: 600;
+}
+
+.btn-primary:hover:not([disabled]) {
+    filter: brightness(1.08);
+}
+
+.btn-secondary {
+    background: var(--surface);
+    border-color: var(--border);
+    color: var(--text);
+}
+
+.btn-secondary:hover:not([disabled]) {
+    background: var(--surface-hover);
+}
+
+.btn-danger {
+    background: var(--danger);
+    color: #ffffff;
+}
+
+.btn-ghost {
+    background: transparent;
+    color: var(--text-dim);
+}
+
+.btn-ghost:hover:not([disabled]) {
+    color: var(--text);
+    background: var(--surface);
+}
+
+.btn-sm {
+    height: 26px;
+    padding: 0 8px;
+    font-size: 12px;
+}
+
+/* Поля ввода (§13.5) */
+.field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.field label {
+    font-size: 12px;
+    color: var(--text-dim);
+}
+
+.field input,
+.field select {
+    height: 32px;
+    padding: 0 10px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg-inset);
+    color: var(--text);
+    font: inherit;
+}
+
+.field input:focus-visible,
+.field select:focus-visible {
+    outline: none;
+    border-color: var(--accent);
+}
+
+/* Панель-карточка */
+.panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+}
+
+.panel-title {
+    font-size: 16px;
+    font-weight: 600;
+    margin: 0 0 10px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+    }
+}

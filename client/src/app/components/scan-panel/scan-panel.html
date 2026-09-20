@@ -1,0 +1,58 @@
+<h3 class="panel-title">Скан</h3>
+
+<div class="row">
+    <span class="status-chip" [class]="'status-chip ' + storeRef.scan().status">
+        <span class="dot"></span>{{ statusLabel() }}
+    </span>
+    @if (storeRef.scan().mode !== null) {
+        <span class="meta">режим: {{ storeRef.scan().mode === 'seq' ? 'шаг 1' : 'шаг 256' }}</span>
+    }
+</div>
+
+<div class="counters tnum">
+    <span>Проверено: <b>{{ fmt(storeRef.scan().probed) }}</b></span>
+    <span>
+        Найдено: <b>{{ fmt(storeRef.scan().found) }}</b>
+        @if (storeRef.scan().stats; as s) {
+            <span class="of" [title]="'фото ' + s.pictures + ', видео ' + s.videos + ' (по статистике сервера)'">
+                из {{ fmt(s.pictures + s.videos) }}
+            </span>
+        }
+    </span>
+    <span title="Проб в секунду">eps: <b>{{ fmt(storeRef.scan().eps) }}</b></span>
+</div>
+
+@if (storeRef.scan().arms.length > 0) {
+    <div class="arms mono">
+        @for (arm of storeRef.scan().arms; track arm.dir) {
+            <span [title]="'фаза ' + arm.phase + ', найдено ' + arm.foundCount">
+                {{ arm.dir === 1 ? '→' : '←' }} {{ arm.pos }}
+            </span>
+        }
+    </div>
+}
+
+@if (storeRef.scan().reason !== null) {
+    <div class="reason" [class.error]="storeRef.scan().status === 'error'">
+        {{ storeRef.scan().reason }}
+        @if (storeRef.scan().status === 'paused') {
+            <button class="btn btn-sm btn-secondary" type="button" (click)="start()">Продолжить</button>
+        }
+    </div>
+}
+
+<div class="actions">
+    @if (storeRef.scanRunning()) {
+        <button class="btn btn-danger" type="button" (click)="stop()">Остановить</button>
+    } @else {
+        <button
+            class="btn btn-primary"
+            type="button"
+            (click)="start()"
+            [disabled]="!canStart()"
+            [title]="canStart() ? '' : 'Сначала подключитесь к серверу'"
+        >
+            {{ storeRef.scan().status === 'paused' ? 'Продолжить' : 'Начать скан' }}
+        </button>
+    }
+</div>

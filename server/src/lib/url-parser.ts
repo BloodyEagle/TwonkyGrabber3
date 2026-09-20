@@ -6,17 +6,10 @@
  *  - порт по умолчанию: 9000 для http, 443 для https;
  *  - путь по умолчанию /disk/ (нормализуется со «/» на конце);
  *  - префикс O0$2$20I парсится из последнего сегмента пути, если тот оканчивается цифрами;
- *  - номер — цифры в конце последнего сегмента, иначе START_NUMBER;
+ *  - номер — цифры в конце последнего сегмента, иначе C.START_NUMBER;
  *  - query (например ?scale=...) игнорируется.
  */
-import {
-    DEFAULT_BASE_PATH,
-    DEFAULT_HTTPS_PORT,
-    DEFAULT_HTTP_PORT,
-    DEFAULT_PREFIX,
-    DEFAULT_PROTOCOL,
-    START_NUMBER,
-} from '../config';
+import { C } from '../config';
 import type {Protocol, TwonkyConnection} from './types';
 
 export type ParseResult =
@@ -42,7 +35,7 @@ export function parseConnectionUrl(raw: string): ParseResult {
     }
 
     // Дописываем схему, если её нет (без «://» new URL примет «host:9000» за протокол).
-    const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) ? trimmed : `${DEFAULT_PROTOCOL}://${trimmed}`;
+    const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) ? trimmed : `${C.DEFAULT_PROTOCOL}://${trimmed}`;
 
     let url: URL;
     try {
@@ -63,7 +56,7 @@ export function parseConnectionUrl(raw: string): ParseResult {
 
     let port: number;
     if (url.port === '') {
-        port = protocol === 'https' ? DEFAULT_HTTPS_PORT : DEFAULT_HTTP_PORT;
+        port = protocol === 'https' ? C.DEFAULT_HTTPS_PORT : C.DEFAULT_HTTP_PORT;
     } else {
         port = Number.parseInt(url.port, 10);
         if (!Number.isFinite(port) || port <= 0 || port > 65535) {
@@ -84,18 +77,18 @@ export function parseConnectionUrl(raw: string): ParseResult {
         basePath = pathname.slice(0, pathname.length - lastSeg.length);
         const tailPrefix = tailMatch[1] ?? '';
         const tailDigits = tailMatch[2] ?? '';
-        prefix = tailPrefix === '' ? DEFAULT_PREFIX : tailPrefix;
+        prefix = tailPrefix === '' ? C.DEFAULT_PREFIX : tailPrefix;
         startNumber = Number.parseInt(tailDigits, 10);
     } else {
         basePath = pathname;
-        prefix = DEFAULT_PREFIX;
-        startNumber = START_NUMBER;
+        prefix = C.DEFAULT_PREFIX;
+        startNumber = C.START_NUMBER;
     }
 
     if (!basePath.startsWith('/')) basePath = `/${basePath}`;
     if (!basePath.endsWith('/')) basePath += '/';
     // Пустой или корневой путь — берём путь Twonky по умолчанию (/disk/).
-    if (basePath === '/') basePath = DEFAULT_BASE_PATH;
+    if (basePath === '/') basePath = C.DEFAULT_BASE_PATH;
 
     // Порт опускаем, только если это стандартный для схемы (80/443); Twonky-дефолт 9000 всегда явный.
     const isDefaultPort =

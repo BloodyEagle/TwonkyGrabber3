@@ -1,0 +1,78 @@
+<div class="bar">
+    @if (storeRef.hasNew() && !storeRef.autoRefresh()) {
+        <button class="new-files" type="button" (click)="refreshNew()">
+            Появились новые файлы ({{ storeRef.newFound() }}) — обновить
+        </button>
+    }
+
+    <label class="check-auto" title="Новые находки автоматически появляются в галерее">
+        <input
+            type="checkbox"
+            [ngModel]="storeRef.autoRefresh()"
+            (ngModelChange)="storeRef.autoRefresh.set($event); refreshNewIfAuto()"
+        />
+        автообновление
+    </label>
+
+    <span class="total tnum">Найдено: {{ fmt(storeRef.filesTotal()) }}</span>
+
+    <div class="pager tnum">
+        <button class="btn btn-sm btn-secondary" type="button" (click)="goToPage(storeRef.page() - 1)" [disabled]="storeRef.page() <= 1" aria-label="Предыдущая страница">‹</button>
+        @for (p of pages(); track p) {
+            @if (p === 0) {
+                <span class="dots">…</span>
+            } @else {
+                <button class="btn btn-sm" [class.page-current]="p === storeRef.page()" type="button" (click)="goToPage(p)">{{ p }}</button>
+            }
+        }
+        <button class="btn btn-sm btn-secondary" type="button" (click)="goToPage(storeRef.page() + 1)" [disabled]="storeRef.page() >= storeRef.totalPages()" aria-label="Следующая страница">›</button>
+    </div>
+
+    <label class="ctrl">
+        <span>Сортировка</span>
+        <select [ngModel]="storeRef.sort()" (ngModelChange)="changeSort($event)">
+            <option value="asc">по номеру ↑</option>
+            <option value="desc">по номеру ↓</option>
+        </select>
+    </label>
+
+    <label class="ctrl">
+        <span>Тип</span>
+        <select [ngModel]="storeRef.typeFilter()" (ngModelChange)="changeType($event)">
+            <option value="all">все</option>
+            <option value="image">изображения</option>
+            <option value="video">видео</option>
+        </select>
+    </label>
+
+    <label class="ctrl">
+        <span>На странице</span>
+        <select [ngModel]="storeRef.pageSize()" [compareWith]="equalAsNumber" (ngModelChange)="changePageSize($event)">
+            @for (s of sizeOptions; track s) {
+                <option [ngValue]="s">{{ s }}</option>
+            }
+        </select>
+    </label>
+
+    <div class="ctrl">
+        <span>Превью</span>
+        <div class="sizes">
+            @for (key of sizeKeys; track key) {
+                <button class="btn btn-sm" [class.page-current]="storeRef.thumbSize() === key" type="button" (click)="setThumbSize(key)">
+                    {{ thumbSizes()[key].label }}
+                </button>
+            }
+        </div>
+    </div>
+
+    <label class="check-all">
+        <input type="checkbox" [checked]="allOnPageSelected()" (change)="toggleAll($event)" />
+        выбрать все на странице
+    </label>
+
+    <button class="btn btn-primary" type="button" (click)="enqueueSelected()" [disabled]="storeRef.selectedCount() === 0">
+        В очередь ({{ storeRef.selectedCount() }})
+    </button>
+    <button class="btn btn-secondary" type="button" (click)="enqueueAll()">Скачать всё</button>
+</div>
+<p class="hint">Клик по превью открывает оригинал; чекбокс выбирает файл, Shift+клик — диапазон в пределах страницы.</p>

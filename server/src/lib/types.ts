@@ -133,6 +133,8 @@ export interface ScanProgress {
     /** Скорость проб, проб/с (eps). */
     eps: number;
     arms: ArmView[];
+    /** Точные счётчики сервера из /rpc/info_status (null — статистика недоступна). */
+    stats: { pictures: number; videos: number } | null;
 }
 
 // --- Очередь: агрегаты ---

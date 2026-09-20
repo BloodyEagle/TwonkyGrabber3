@@ -1,10 +1,11 @@
 /**
  * Персистентное состояние сервера (план, п.5.10, п.6).
- * Запись атомарная (tmp + rename), каждые SAVE_EVERY_MS и при завершении процесса.
+ * Запись атомарная (tmp + rename), каждые C.SAVE_EVERY_MS и при завершении процесса.
  */
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import { SAVE_EVERY_MS, STATE_FILE } from '../config';
+import { STATE_FILE, C } from '../config';
+import type { RuntimeConfig } from '../config';
 import type { PersistedScanState } from './scanner';
 import type { PersistedQueueState } from './downloader';
 
@@ -13,6 +14,7 @@ export interface PersistedState {
     version: 1;
     scan: PersistedScanState | null;
     queue: PersistedQueueState | null;
+    config: RuntimeConfig | null;
 }
 
 /** Минимальная структурная валидация секции сканера (своему файлу доверяем). */
@@ -27,6 +29,11 @@ function isPersistedQueue(value: unknown): value is PersistedQueueState {
     if (typeof value !== 'object' || value === null) return false;
     const v = value as Record<string, unknown>;
     return Array.isArray(v.items);
+}
+
+/** Минимальная структурная валидация секции конфигурации. */
+function isPersistedConfig(value: unknown): value is RuntimeConfig {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 /**
@@ -58,6 +65,7 @@ export class Store {
                 version: 1,
                 scan: isPersistedScan(v.scan) ? v.scan : null,
                 queue: isPersistedQueue(v.queue) ? v.queue : null,
+                config: isPersistedConfig(v.config) ? v.config : null,
             };
         } catch (err: unknown) {
             console.warn(
@@ -72,7 +80,7 @@ export class Store {
         this.stop();
         this.timer = setInterval(() => {
             void this.saveNow(getState());
-        }, SAVE_EVERY_MS);
+        }, C.SAVE_EVERY_MS);
     }
 
     /** Немедленная атомарная запись состояния. */

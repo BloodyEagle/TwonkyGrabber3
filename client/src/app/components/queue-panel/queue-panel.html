@@ -1,0 +1,109 @@
+<div class="drawer-backdrop" (click)="close()"></div>
+<aside class="drawer" role="complementary" aria-label="Очередь скачивания">
+    <header>
+        <h3>Очередь</h3>
+        <button class="btn btn-sm btn-ghost" type="button" (click)="close()" aria-label="Закрыть">✕</button>
+    </header>
+
+    @if (storeRef.queue(); as q) {
+        <div class="counts tnum">
+            <span class="c pending">в ожидании {{ q.counts.pending }}</span>
+            <span class="c active">активных {{ q.counts.active }}</span>
+            <span class="c done">готово {{ q.counts.done }}</span>
+            <span class="c skipped">пропущено {{ q.counts.skipped }}</span>
+            <span class="c failed">ошибок {{ q.counts.failed }}</span>
+        </div>
+
+        <div class="speed-threads">
+            <span>{{ fmtSpeed(q.speed) }}</span>
+            <span title="живых / целевых потоков">потоки: {{ q.threads.live }}/{{ q.threads.target }}</span>
+            <span>{{ q.threads.mode === 'auto' ? 'авто' : 'вручную' }}</span>
+        </div>
+
+        <div class="threads-ctrl">
+            <label class="check">
+                <input
+                    type="checkbox"
+                    [checked]="q.threads.mode === 'auto'"
+                    (change)="setModeChange($event)"
+                />
+                авто
+            </label>
+            @if (q.threads.mode === 'manual') {
+                <label class="slider">
+                    <input
+                        type="range"
+                        min="1"
+                        max="32"
+                        [ngModel]="q.threads.manual"
+                        (ngModelChange)="manualValue.set($event)"
+                        (change)="setManual($event)"
+                    />
+                    <span class="tnum">{{ q.threads.manual }}</span>
+                </label>
+            }
+        </div>
+
+        <div class="actions">
+            @if (q.paused) {
+                <button class="btn btn-sm btn-primary" type="button" (click)="resume()">Продолжить</button>
+            } @else {
+                <button class="btn btn-sm btn-secondary" type="button" (click)="pause()">Пауза</button>
+            }
+            <button class="btn btn-sm btn-secondary" type="button" (click)="retryFailed()">Повторить ошибки</button>
+            <button class="btn btn-sm btn-secondary" type="button" (click)="clearCompleted()">Очистить готовые</button>
+        </div>
+
+        @if (q.autoAll) {
+            <div class="autoall">«Скачать всё» активно — новые находки добавляются автоматически</div>
+        }
+
+        @if (q.active.length > 0) {
+            <section class="active-list">
+                <h4>Активные</h4>
+                @for (item of q.active; track item.number) {
+                    <div class="active-item">
+                        <span class="mono name" [title]="item.name">{{ item.baseName }}</span>
+                        <div class="progress" [title]="fmtSize(item.downloaded) + ' из ' + fmtSize(item.size)">
+                            <div class="fill" [style.width.%]="pct(item)"></div>
+                        </div>
+                        <span class="tnum pct">{{ pct(item) }}%</span>
+                    </div>
+                }
+            </section>
+        }
+
+        <section class="list">
+            <div class="list-head">
+                <h4>Список</h4>
+                <span class="tnum">всего {{ fmt(q.total) }}</span>
+                <div class="pager">
+                    <button class="btn btn-sm btn-secondary" type="button" (click)="prevPage()" [disabled]="storeRef.queuePage() <= 1">‹</button>
+                    <span class="tnum">{{ storeRef.queuePage() }}</span>
+                    <button class="btn btn-sm btn-secondary" type="button" (click)="nextPage()">›</button>
+                </div>
+            </div>
+            <button class="btn btn-sm btn-ghost" type="button" (click)="loadPage(storeRef.queuePage())">Обновить</button>
+            @for (item of storeRef.queueItems(); track item.number) {
+                <div [class]="'row ' + item.status">
+                    <span class="mono name" [title]="item.name + (item.savedAs ? ' → ' + item.savedAs : '')">{{ item.baseName }}</span>
+                    <span class="status">{{ statusLabel(item.status) }}</span>
+                    @if (item.note !== null) {
+                        <span class="note">{{ item.note }}</span>
+                    }
+                    @if (item.error !== null) {
+                        <span class="error" [title]="item.error">{{ item.error }}</span>
+                    }
+                    <span class="size tnum">{{ fmtSize(item.size) }}</span>
+                    @if (item.status !== 'active') {
+                        <button class="btn btn-sm btn-ghost" type="button" (click)="remove(item.number)" aria-label="Удалить из очереди">✕</button>
+                    }
+                </div>
+            } @empty {
+                <p class="empty-list">Пусто</p>
+            }
+        </section>
+    } @else {
+        <p class="empty-list">Очередь ещё не получена — подключение к серверу…</p>
+    }
+</aside>

@@ -1,0 +1,128 @@
+:host {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.status-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 26px;
+    padding: 0 10px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg-inset);
+    color: var(--text-dim);
+    font-size: 12px;
+}
+
+.status-chip .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--text-mute);
+}
+
+.status-chip.scanning {
+    color: var(--accent);
+    border-color: var(--accent);
+}
+
+.status-chip.scanning .dot {
+    background: var(--accent);
+    animation: pulse 1.5s ease-in-out infinite;
+}
+
+.status-chip.paused {
+    color: var(--warning);
+    border-color: var(--warning);
+}
+
+.status-chip.paused .dot {
+    background: var(--warning);
+}
+
+.status-chip.done {
+    color: var(--success);
+    border-color: var(--success);
+}
+
+.status-chip.done .dot {
+    background: var(--success);
+}
+
+.status-chip.error {
+    color: var(--danger);
+    border-color: var(--danger);
+}
+
+.status-chip.error .dot {
+    background: var(--danger);
+}
+
+@keyframes pulse {
+    0%,
+    100% {
+        opacity: 1;
+    }
+    50% {
+        opacity: 0.35;
+    }
+}
+
+.meta {
+    color: var(--text-dim);
+    font-size: 12px;
+}
+
+.counters {
+    display: flex;
+    gap: 16px;
+    color: var(--text-dim);
+}
+
+.counters b {
+    color: var(--text);
+}
+
+.of {
+    color: var(--text-dim);
+    font-size: 12px;
+}
+
+.arms {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    font-size: 12px;
+    color: var(--text-dim);
+}
+
+.reason {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--warning) 12%, transparent);
+    color: var(--warning);
+    font-size: 12px;
+}
+
+.reason.error {
+    background: color-mix(in srgb, var(--danger) 12%, transparent);
+    color: var(--danger);
+}
+
+.actions {
+    display: flex;
+    gap: 8px;
+}

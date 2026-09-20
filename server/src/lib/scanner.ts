@@ -2,32 +2,17 @@
  * Сканер Twonky (план, п.5).
  *
  * Жизненный цикл: start() → разведка (detect) → руки (arms) → done.
- * Руки делят общий семафор PROBE_CONCURRENCY; глобальный visited-сет исключает
+ * Руки делят общий семафор C.PROBE_CONCURRENCY; глобальный visited-сет исключает
  * повторные пробы и дубли находок. Фазы руки: scan | gapfill | sparse.
  *
  * Зависимость Prober внедряется — в юнит-тестах подставляется мок (сеть запрещена).
  */
-import {
-    DETECT_BLOCK,
-    DENSE_SWEEP_EVERY,
-    EPS_WINDOW_MS,
-    JUMP_POSITIONS,
-    JUMP_REPEATS,
-    MAX_NUMBER,
-    MISS_LIMIT,
-    NETERR_PAUSE,
-    PROBE_BATCH,
-    PROBE_CONCURRENCY,
-    SEQ_THRESHOLD,
-    SPARSE_MAX,
-    SPARSE_MIN,
-    SPARSE_PROBES,
-    STEP_DELTA,
-} from '../config';
+import { C } from '../config';
 import { buildFileName } from './mime';
 import { fileUrl } from './url-parser';
 import type { Arm, ArmDir, FoundFile, ScanMode, ScanProgress, ScanStatus, TwonkyConnection } from './types';
 import type { ProbeResult } from './probe';
+import type { ServerStats } from './server-stats';
 
 /** Пробер по номеру файла (интерфейс для моков в тестах). */
 export interface Prober {
@@ -74,16 +59,16 @@ class Semaphore {
     }
 }
 
-/** Шаг разреженного поиска: случайный из [SPARSE_MIN..SPARSE_MAX], в delta — кратный шагу. */
+/** Шаг разреженного поиска: случайный из [C.SPARSE_MIN..C.SPARSE_MAX], в delta — кратный шагу. */
 function sparseStep(step: number): number {
-    const raw = SPARSE_MIN + Math.floor(Math.random() * (SPARSE_MAX - SPARSE_MIN + 1));
+    const raw = C.SPARSE_MIN + Math.floor(Math.random() * (C.SPARSE_MAX - C.SPARSE_MIN + 1));
     if (step <= 1) return raw;
     const rounded = Math.round(raw / step) * step;
     return Math.max(step, rounded);
 }
 
 function outOfRange(n: number): boolean {
-    return n < 0 || n > MAX_NUMBER;
+    return n < 0 || n > C.MAX_NUMBER;
 }
 
 /** Чтение состояния руки через функцию снимает ложное сужение типа в цикле runArm. */
@@ -111,7 +96,7 @@ export class Scanner {
     private resumeWaiters: Array<() => void> = [];
     private readonly foundSinks: Array<(files: FoundFile[]) => void> = [];
     private probeTimestamps: number[] = [];
-    private readonly sem = new Semaphore(PROBE_CONCURRENCY);
+    private readonly sem = new Semaphore(C.PROBE_CONCURRENCY);
 
     constructor(private readonly prober: Prober) {}
 
@@ -122,6 +107,40 @@ export class Scanner {
 
     private emitFound(files: FoundFile[]): void {
         for (const sink of this.foundSinks) sink(files);
+        this.checkStatsDone();
+    }
+
+    /** Точные счётчики сервера (/rpc/info_status); останавливает скан при полном наборе. */
+    setServerTotals(stats: ServerStats | null): void {
+        this.serverTotals = stats;
+        this.checkStatsDone();
+    }
+
+    private serverTotals: ServerStats | null = null;
+
+    /** Досрочное завершение: найдены все файлы по статистике сервера. */
+    private checkStatsDone(): void {
+        if (this.serverTotals === null) return;
+        if (this.status !== 'detecting' && this.status !== 'scanning') return;
+        const target = this.serverTotals.pictures + this.serverTotals.videos;
+        if (target <= 0 || this.mediaFoundCount() < target) return;
+        this.generation += 1;
+        this.pausedFlag = false;
+        const waiters = this.resumeWaiters;
+        this.resumeWaiters = [];
+        for (const w of waiters) w();
+        for (const arm of this.arms) arm.state = 'stopped';
+        this.status = 'done';
+        this.reason = `Найдены все файлы по статистике сервера (фото ${this.serverTotals.pictures}, видео ${this.serverTotals.videos})`;
+    }
+
+    /** Число найденных image/video (музыку сканер не ищет). */
+    private mediaFoundCount(): number {
+        let count = 0;
+        for (const f of this.foundMap.values()) {
+            if (f.kind === 'image' || f.kind === 'video') count += 1;
+        }
+        return count;
     }
 
     getConnection(): TwonkyConnection | null {
@@ -142,7 +161,15 @@ export class Scanner {
             probed: this.probed,
             found: this.foundMap.size,
             eps: this.eps(),
-            arms: this.arms.map((a) => ({ dir: a.dir, pos: a.pos, phase: a.phase, state: a.state })),
+            stats: this.serverTotals,
+            arms: this.arms.map((a) => ({
+                dir: a.dir,
+                pos: a.pos,
+                step: a.step,
+                phase: a.phase,
+                state: a.state,
+                foundCount: a.foundCount,
+            })),
         };
     }
 
@@ -247,11 +274,11 @@ export class Scanner {
 
     private eps(): number {
         const now = Date.now();
-        const cutoff = now - EPS_WINDOW_MS;
+        const cutoff = now - C.EPS_WINDOW_MS;
         while (this.probeTimestamps.length > 0 && (this.probeTimestamps[0] ?? 0) < cutoff) {
             this.probeTimestamps.shift();
         }
-        return this.probeTimestamps.length / (EPS_WINDOW_MS / 1000);
+        return this.probeTimestamps.length / (C.EPS_WINDOW_MS / 1000);
     }
 
     /** Ожидание паузы; false — цикл должен прерваться (reset). */
@@ -287,17 +314,17 @@ export class Scanner {
         });
     }
 
-    /** Разведка блока start..start+DETECT_BLOCK-1. */
+    /** Разведка блока start..start+C.DETECT_BLOCK-1. */
     private async detect(gen: number, conn: TwonkyConnection): Promise<void> {
         const startN = conn.startNumber;
         const foundNumbers: number[] = [];
         let anyResponse = false;
 
-        for (let base = 0; base < DETECT_BLOCK; base += PROBE_BATCH) {
+        for (let base = 0; base < C.DETECT_BLOCK; base += C.PROBE_BATCH) {
             if (!(await this.waitGate(gen))) return;
 
             const items: number[] = [];
-            for (let k = 0; k < PROBE_BATCH && base + k < DETECT_BLOCK; k += 1) {
+            for (let k = 0; k < C.PROBE_BATCH && base + k < C.DETECT_BLOCK; k += 1) {
                 const n = startN + base + k;
                 if (!this.visited.has(n)) {
                     this.visited.add(n);
@@ -314,7 +341,7 @@ export class Scanner {
                 this.probeTimestamps.push(Date.now());
                 if (res.kind === 'neterr') {
                     this.neterrStreak += 1;
-                    if (this.neterrStreak >= NETERR_PAUSE) {
+                    if (this.neterrStreak >= C.NETERR_PAUSE) {
                         this.pauseNeterr();
                         return;
                     }
@@ -338,7 +365,7 @@ export class Scanner {
             return;
         }
 
-        this.mode = foundNumbers.length >= SEQ_THRESHOLD ? 'seq' : 'delta';
+        this.mode = foundNumbers.length >= C.SEQ_THRESHOLD ? 'seq' : 'delta';
         this.arms = this.buildArms(this.mode, startN, foundNumbers);
         this.status = 'scanning';
         for (const arm of this.arms) {
@@ -367,14 +394,14 @@ export class Scanner {
             sparseLeft: 0,
         });
         if (mode === 'seq') {
-            return [mk(1, startN + DETECT_BLOCK, 1), mk(-1, startN - 1, 1)];
+            return [mk(1, startN + C.DETECT_BLOCK, 1), mk(-1, startN - 1, 1)];
         }
         // delta: якоря = найденные номера (ноль найдено → виртуальный якорь на старте)
         const list = anchors.length > 0 ? anchors : [startN];
         const arms: Arm[] = [];
         for (const a of list) {
-            arms.push(mk(1, a + STEP_DELTA, STEP_DELTA));
-            arms.push(mk(-1, a - STEP_DELTA, STEP_DELTA));
+            arms.push(mk(1, a + C.STEP_DELTA, C.STEP_DELTA));
+            arms.push(mk(-1, a - C.STEP_DELTA, C.STEP_DELTA));
         }
         return arms;
     }
@@ -395,19 +422,19 @@ export class Scanner {
             await this.probeBatch(batch);
 
             // Прыжки / смена фаз по итогам батча.
-            if (arm.phase === 'scan' && arm.missStreak >= MISS_LIMIT) {
+            if (arm.phase === 'scan' && arm.missStreak >= C.MISS_LIMIT) {
                 arm.missStreak = 0;
-                if (arm.jumpsDone < JUMP_REPEATS) {
-                    arm.pos += arm.dir * JUMP_POSITIONS * arm.step;
+                if (arm.jumpsDone < C.JUMP_REPEATS) {
+                    arm.pos += arm.dir * C.JUMP_POSITIONS * arm.step;
                     arm.jumpsDone += 1;
                     arm.hadJump = true;
                     if (outOfRange(arm.pos)) arm.state = 'stopped';
                 } else {
                     arm.phase = 'sparse';
-                    arm.sparseLeft = SPARSE_PROBES;
+                    arm.sparseLeft = C.SPARSE_PROBES;
                 }
             }
-            if (arm.phase === 'gapfill' && arm.gapMiss >= MISS_LIMIT) {
+            if (arm.phase === 'gapfill' && arm.gapMiss >= C.MISS_LIMIT) {
                 this.finishGapfill(arm);
             }
             if (arm.phase === 'sparse' && arm.sparseLeft <= 0) {
@@ -422,7 +449,7 @@ export class Scanner {
     private planBatch(arm: Arm): BatchItem[] {
         const batch: BatchItem[] = [];
 
-        while (arm.sweepQueue.length > 0 && batch.length < PROBE_BATCH) {
+        while (arm.sweepQueue.length > 0 && batch.length < C.PROBE_BATCH) {
             const n = arm.sweepQueue.shift();
             if (n === undefined) break;
             if (outOfRange(n) || this.visited.has(n)) continue;
@@ -430,7 +457,7 @@ export class Scanner {
             batch.push({ number: n, fromSweep: true, arm });
         }
 
-        while (batch.length < PROBE_BATCH) {
+        while (batch.length < C.PROBE_BATCH) {
             if (arm.phase === 'scan') {
                 const n = arm.pos;
                 arm.pos += arm.step * arm.dir;
@@ -456,7 +483,7 @@ export class Scanner {
                 if (arm.sparseLeft <= 0) break;
                 let attempts = 0;
                 let planned = true;
-                while (planned && batch.length < PROBE_BATCH && arm.sparseLeft > 0 && attempts < PROBE_BATCH * 2) {
+                while (planned && batch.length < C.PROBE_BATCH && arm.sparseLeft > 0 && attempts < C.PROBE_BATCH * 2) {
                     attempts += 1;
                     const n = arm.pos + arm.dir * sparseStep(arm.step);
                     arm.pos = n;
@@ -514,7 +541,7 @@ export class Scanner {
         }
 
         if (newFound.length > 0) this.emitFound(newFound);
-        if (neterrNow && this.neterrStreak >= NETERR_PAUSE) this.pauseNeterr();
+        if (neterrNow && this.neterrStreak >= C.NETERR_PAUSE) this.pauseNeterr();
     }
 
     /** Обработка находки: регистрация + фазовые переходы руки. */
@@ -538,7 +565,7 @@ export class Scanner {
             arm.jumpsDone = 0;
         }
 
-        if (arm.foundSinceSweep >= DENSE_SWEEP_EVERY) {
+        if (arm.foundSinceSweep >= C.DENSE_SWEEP_EVERY) {
             this.enqueueSweep(arm, n);
             arm.foundSinceSweep = 0;
         }
@@ -546,8 +573,8 @@ export class Scanner {
 
     /** Поставить в очередь плотный проход: 256 подряд идущих номеров вокруг находки. */
     private enqueueSweep(arm: Arm, foundN: number): void {
-        const start = arm.dir === 1 ? foundN : foundN - (DETECT_BLOCK - 1);
-        for (let k = 0; k < DETECT_BLOCK; k += 1) {
+        const start = arm.dir === 1 ? foundN : foundN - (C.DETECT_BLOCK - 1);
+        for (let k = 0; k < C.DETECT_BLOCK; k += 1) {
             const n = start + k;
             if (!outOfRange(n)) arm.sweepQueue.push(n);
         }
