@@ -1,0 +1,20 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# IDE и служебное
+.idea
+.vscode
+.DS_Store
+*.md
+
+# Зависимости и сборка (ставятся/собираются внутри образа)
+**/node_modules
+**/dist
+
+# Рантайм-данные (в образ не входят — монтируются volume)
+server/data
+server/downloads
+client/.angular
+client/.vscode
