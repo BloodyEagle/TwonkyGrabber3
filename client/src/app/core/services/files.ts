@@ -36,8 +36,12 @@ export class FilesService {
     }
 
     async setPageSize(size: number): Promise<void> {
+        // Сохраняем позицию: первый элемент текущей страницы должен остаться на экране.
+        // Смещение первого элемента в отсортированном списке -> новая страница для нового size.
+        const offset = (this.store.page() - 1) * this.store.pageSize();
         this.store.pageSize.set(size);
-        await this.loadPage(1);
+        const page = Math.floor(offset / size) + 1;
+        await this.loadPage(page);
     }
 
     /** Плашка «Появились новые файлы — обновить». */

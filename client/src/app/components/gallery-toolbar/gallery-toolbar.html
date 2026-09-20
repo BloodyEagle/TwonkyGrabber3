@@ -17,6 +17,7 @@
     <span class="total tnum">Найдено: {{ fmt(storeRef.filesTotal()) }}</span>
 
     <div class="pager tnum">
+        <button class="btn btn-sm btn-secondary" type="button" (click)="goToPage(storeRef.page() - 10)" [disabled]="storeRef.page() <= 10" aria-label="На 10 страниц назад" title="На 10 страниц назад">‹‹</button>
         <button class="btn btn-sm btn-secondary" type="button" (click)="goToPage(storeRef.page() - 1)" [disabled]="storeRef.page() <= 1" aria-label="Предыдущая страница">‹</button>
         @for (p of pages(); track p) {
             @if (p === 0) {
@@ -26,6 +27,7 @@
             }
         }
         <button class="btn btn-sm btn-secondary" type="button" (click)="goToPage(storeRef.page() + 1)" [disabled]="storeRef.page() >= storeRef.totalPages()" aria-label="Следующая страница">›</button>
+        <button class="btn btn-sm btn-secondary" type="button" (click)="goToPage(storeRef.page() + 10)" [disabled]="storeRef.page() + 10 > storeRef.totalPages()" aria-label="На 10 страниц вперёд" title="На 10 страниц вперёд">››</button>
     </div>
 
     <label class="ctrl">

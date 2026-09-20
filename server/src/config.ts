@@ -56,6 +56,9 @@ export const THUMB_MIN = 16;
 export const THUMB_MAX = 2000;
 export const THUMB_CACHE_MAX_AGE = 86_400;
 export const SAVE_EVERY_MS = 5000;
+
+/** Задержка между ретраями записи state.json (Windows: EPERM на rename). */
+export const SAVE_RETRY_DELAY_MS = 300;
 export const SSE_SCAN_MS = 500;
 export const SSE_FOUND_FLUSH_MS = 500;
 export const SSE_QUEUE_MS = 1000;

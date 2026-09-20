@@ -4,10 +4,15 @@
  */
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import { STATE_FILE, C } from '../config';
+import { STATE_FILE, C, SAVE_RETRY_DELAY_MS } from '../config';
 import type { RuntimeConfig } from '../config';
 import type { PersistedScanState } from './scanner';
 import type { PersistedQueueState } from './downloader';
+
+/** Пауза между ретраями записи (см. C.SAVE_RETRY_DELAY_MS). */
+function sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 /** Корень state.json. */
 export interface PersistedState {
@@ -83,18 +88,37 @@ export class Store {
         }, C.SAVE_EVERY_MS);
     }
 
-    /** Немедленная атомарная запись состояния. */
+    /** Немедленная атомарная запись состояния (с ретраями под Windows). */
     async saveNow(state: PersistedState): Promise<void> {
+        const data = `${JSON.stringify(state)}\n`;
         try {
             await mkdir(dirname(this.filePath), { recursive: true });
-            const tmp = `${this.filePath}.tmp`;
-            await writeFile(tmp, `${JSON.stringify(state)}\n`, 'utf8');
-            await rename(tmp, this.filePath);
-        } catch (err: unknown) {
-            // Проблемы диска не роняют сервер — попробуем записать следующим тиком.
-            console.error(
-                `[store] не удалось записать состояние: ${err instanceof Error ? err.message : String(err)}`,
-            );
+        } catch {
+            return; // каталог не создать — писать некуда
+        }
+        // Windows: rename в существующий файл даёт EPERM при кратковременной блокировке
+        // (антивирус/индексатор). Несколько попыток, затем неатомарная запись поверх.
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+            try {
+                const tmp = `${this.filePath}.tmp`;
+                await writeFile(tmp, data, 'utf8');
+                await rename(tmp, this.filePath);
+                return;
+            } catch (err: unknown) {
+                if (attempt === 2) {
+                    console.error(
+                        `[store] не удалось записать состояние: ${err instanceof Error ? err.message : String(err)}`,
+                    );
+                } else {
+                    await sleep(SAVE_RETRY_DELAY_MS);
+                }
+            }
+        }
+        // Фолбэк: прямая запись поверх (менее атомарно, но надёжнее при EPERM на rename).
+        try {
+            await writeFile(this.filePath, data, 'utf8');
+        } catch {
+            /* состояние просто не сохранится в этот тик */
         }
     }
 
