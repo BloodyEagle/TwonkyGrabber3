@@ -71,7 +71,7 @@ export class StateStore {
     readonly pageSize = signal(PAGE_SIZE_DEFAULT);
     readonly sort = signal<SortDir>('asc');
     readonly typeFilter = signal<TypeFilter>('all');
-    readonly thumbSize = signal<ThumbSizeKey>('M');
+    readonly thumbSize = signal<ThumbSizeKey>('S');
     readonly filesLoading = signal(false);
     /** Новые находки с последнего обновления страницы (плашка «Появились новые файлы»). */
     readonly newFound = signal(0);
