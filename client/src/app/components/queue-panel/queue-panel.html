@@ -2,6 +2,7 @@
 <aside class="drawer" role="complementary" aria-label="Очередь скачивания">
     <header>
         <h3>Очередь</h3>
+        <span class="mono sid" [title]="'сессия ' + sid()">#{{ sid() }}</span>
         <button class="btn btn-sm btn-ghost" type="button" (click)="close()" aria-label="Закрыть">✕</button>
     </header>
 

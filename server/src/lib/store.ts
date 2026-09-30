@@ -1,11 +1,15 @@
 /**
  * Персистентное состояние сервера (план, п.5.10, п.6).
  * Запись атомарная (tmp + rename), каждые C.SAVE_EVERY_MS и при завершении процесса.
+ *
+ * Версия 2 — несколько серверов (сессий) в одном state.json.
+ * Загрузка версии 1 автоматически мигрирует одиночное состояние в сессию «1».
  */
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { STATE_FILE, C, SAVE_RETRY_DELAY_MS } from '../config';
 import type { RuntimeConfig } from '../config';
+import { sanitizeDirName, sessionDir } from './sessions';
 import type { PersistedScanState } from './scanner';
 import type { PersistedQueueState } from './downloader';
 
@@ -14,11 +18,19 @@ function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Корень state.json. */
-export interface PersistedState {
-    version: 1;
+/** Состояние одной сессии в state.json (версия 2). */
+export interface PersistedSessionState {
+    id: string;
+    dir: string;
     scan: PersistedScanState | null;
     queue: PersistedQueueState | null;
+}
+
+/** Корень state.json (версия 2 — список сессий). */
+export interface PersistedState {
+    version: 2;
+    nextSessionId: number;
+    sessions: PersistedSessionState[];
     config: RuntimeConfig | null;
 }
 
@@ -39,6 +51,38 @@ function isPersistedQueue(value: unknown): value is PersistedQueueState {
 /** Минимальная структурная валидация секции конфигурации. */
 function isPersistedConfig(value: unknown): value is RuntimeConfig {
     return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** Минимальная структурная валидация записи сессии. */
+function isPersistedSession(value: unknown): value is PersistedSessionState {
+    if (typeof value !== 'object' || value === null) return false;
+    const v = value as Record<string, unknown>;
+    return typeof v.id === 'string' && v.id !== '' && typeof v.dir === 'string' && v.dir !== '';
+}
+
+/** Каталог загрузок для миграции v1 без сканера: host_port из первого URL очереди. */
+function queueDirFallback(queue: PersistedQueueState): string {
+    for (const item of queue.items) {
+        const m = /^[a-z][a-z0-9+.-]*:\/\/([^/:?#]+)(?::(\d+))?/i.exec(item.url);
+        if (m !== null) {
+            return sanitizeDirName(`${m[1] ?? 'server'}_${m[2] ?? '9000'}`);
+        }
+    }
+    return 'server';
+}
+
+/** Миграция v1 (одиночный скан + очередь) → v2 (одна сессия «1»). */
+function migrateV1(v: Record<string, unknown>): PersistedState {
+    const scan = isPersistedScan(v.scan) ? v.scan : null;
+    const queue = isPersistedQueue(v.queue) ? v.queue : null;
+    const config = isPersistedConfig(v.config) ? v.config : null;
+    if (scan === null && queue === null) {
+        return { version: 2, nextSessionId: 1, sessions: [], config };
+    }
+    // Здесь queue !== null (иначе ранний выход выше) — TS не сужает из-за && .
+    const dir = scan !== null ? sessionDir(scan.connection) : queueDirFallback(queue as PersistedQueueState);
+    console.log(`[store] state.json v1 → v2: сессия «1», каталог ${dir}`);
+    return { version: 2, nextSessionId: 2, sessions: [{ id: '1', dir, scan, queue }], config };
 }
 
 /**
@@ -62,14 +106,30 @@ export class Store {
             const parsed: unknown = JSON.parse(raw);
             if (typeof parsed !== 'object' || parsed === null) return null;
             const v = parsed as Record<string, unknown>;
-            if (v.version !== 1) {
+            if (v.version === 1) {
+                return migrateV1(v);
+            }
+            if (v.version !== 2) {
                 console.warn('[store] неизвестная версия state.json — состояние игнорируется');
                 return null;
             }
+            const rawSessions = Array.isArray(v.sessions) ? v.sessions : [];
+            const sessions = rawSessions
+                .filter(isPersistedSession)
+                .map((s) => ({
+                    id: s.id,
+                    dir: s.dir,
+                    scan: isPersistedScan(s.scan) ? s.scan : null,
+                    queue: isPersistedQueue(s.queue) ? s.queue : null,
+                }));
+            const nextSessionId =
+                typeof v.nextSessionId === 'number' && Number.isFinite(v.nextSessionId) && v.nextSessionId >= 1
+                    ? Math.floor(v.nextSessionId)
+                    : sessions.length + 1;
             return {
-                version: 1,
-                scan: isPersistedScan(v.scan) ? v.scan : null,
-                queue: isPersistedQueue(v.queue) ? v.queue : null,
+                version: 2,
+                nextSessionId,
+                sessions,
                 config: isPersistedConfig(v.config) ? v.config : null,
             };
         } catch (err: unknown) {

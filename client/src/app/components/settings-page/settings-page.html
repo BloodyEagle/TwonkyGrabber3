@@ -6,7 +6,10 @@
 
     @if (settings(); as s) {
         <section class="panel">
-            <h3 class="panel-title">Очередь</h3>
+            <h3 class="panel-title">Очередь — активная сессия</h3>
+            @if (storeRef.activeSid(); as sid) {
+                <p class="dim">Сессия <span class="mono">#{{ sid }}</span></p>
+            }
             <label class="check">
                 <input type="checkbox" [checked]="s.autoAll" (change)="toggleAutoAll($event)" />
                 «Скачать всё» — автодобавление новых находок
@@ -23,7 +26,12 @@
                     </label>
                 }
             </div>
-            <p class="dim">Папка загрузок: <span class="mono">{{ s.downloadDir }}</span></p>
+            <p class="dim">Папка загрузок сессии: <span class="mono">{{ s.downloadDir }}</span></p>
+        </section>
+    } @else if (storeRef.activeSid() === null) {
+        <section class="panel">
+            <h3 class="panel-title">Очередь — активная сессия</h3>
+            <p class="dim">Выберите вкладку сервера: настройки загрузчика применяются к активной сессии.</p>
         </section>
     }
 
@@ -92,17 +100,5 @@
                 }
             </div>
         }
-    </section>
-
-    <section class="panel">
-        <h3 class="panel-title">Сброс состояния</h3>
-        <div class="reset">
-            <label class="check"><input type="checkbox" [ngModel]="resetScan()" (ngModelChange)="resetScan.set($event)" /> сбросить скан</label>
-            <label class="check"><input type="checkbox" [ngModel]="resetQueue()" (ngModelChange)="resetQueue.set($event)" /> сбросить очередь</label>
-            <button class="btn btn-danger" type="button" (click)="doReset()">
-                {{ confirmReset() ? 'Точно сбросить?' : 'Сбросить' }}
-            </button>
-        </div>
-        <p class="dim">Скачанные файлы на диске не удаляются.</p>
     </section>
 </div>

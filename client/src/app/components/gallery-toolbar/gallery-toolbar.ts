@@ -42,6 +42,10 @@ export class GalleryToolbar {
         return out;
     });
 
+    protected readonly allPages = computed<number[]>(() =>
+        Array.from({ length: this.store.totalPages() }, (_, i) => i + 1),
+    );
+
     protected readonly thumbSizes = this.store.thumbSizes;
     protected readonly sizeKeys = Object.keys(THUMB_SIZES) as (keyof typeof THUMB_SIZES)[];
 
@@ -78,10 +82,12 @@ export class GalleryToolbar {
     }
 
     protected async enqueueSelected(): Promise<void> {
+        const sid = this.store.activeSid();
+        if (sid === null) return;
         const numbers = [...this.store.selection()];
         if (numbers.length === 0) return;
         try {
-            const added = await this.api.queueAdd(numbers);
+            const added = await this.api.queueAdd(sid, numbers);
             this.toast.show('success', `Добавлено в очередь: ${added}`);
             this.store.clearSelection();
         } catch (err: unknown) {
@@ -90,8 +96,10 @@ export class GalleryToolbar {
     }
 
     protected async enqueueAll(): Promise<void> {
+        const sid = this.store.activeSid();
+        if (sid === null) return;
         try {
-            const added = await this.api.queueAddAll();
+            const added = await this.api.queueAddAll(sid);
             this.toast.show('success', `«Скачать всё»: добавлено ${added}`);
         } catch (err: unknown) {
             this.toast.show('error', err instanceof Error ? err.message : String(err));

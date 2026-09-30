@@ -1,0 +1,128 @@
+:host {
+    display: block;
+}
+
+.tabs {
+    display: flex;
+    align-items: stretch;
+    gap: 4px;
+    flex-wrap: wrap;
+}
+
+.tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    height: 34px;
+    padding: 0 10px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text-dim);
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+    transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
+}
+
+.tab:hover {
+    background: var(--surface-hover);
+    color: var(--text);
+}
+
+.tab.active {
+    background: var(--surface-hover);
+    border-color: var(--accent);
+    color: var(--text);
+}
+
+.tab .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--text-mute);
+    flex: none;
+}
+
+.tab.scanning .dot {
+    background: var(--accent);
+    animation: pulse 1.5s ease-in-out infinite;
+}
+
+.tab.paused .dot {
+    background: var(--warning);
+}
+
+.tab.done .dot {
+    background: var(--success);
+}
+
+.tab.error .dot {
+    background: var(--danger);
+}
+
+@keyframes pulse {
+    0%,
+    100% {
+        opacity: 1;
+    }
+    50% {
+        opacity: 0.35;
+    }
+}
+
+.tab .label {
+    max-width: 180px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.tab .badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    border-radius: 9px;
+    background: var(--accent);
+    color: #0e1116;
+    font-size: 11px;
+    font-weight: 600;
+    flex: none;
+}
+
+.tab .close {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 4px;
+    color: var(--text-mute);
+    font-size: 12px;
+    line-height: 1;
+    flex: none;
+}
+
+.tab .close:hover {
+    background: var(--danger);
+    color: #ffffff;
+}
+
+.tab.new {
+    color: var(--text-dim);
+    font-size: 16px;
+    padding: 0 12px;
+}
+
+.tab.new.active {
+    color: var(--accent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .tab .dot {
+        animation: none;
+    }
+}

@@ -1,9 +1,10 @@
-import { Component, inject, signal } from '@angular/core';
+import { Component, effect, inject, signal } from '@angular/core';
 import { ApiService } from './core/services/api';
 import { FilesService } from './core/services/files';
 import { SseService } from './core/services/sse';
 import { StateStore } from './core/services/state-store';
 import { ToastService } from './core/services/toast';
+import { TabsBar } from './components/tabs-bar/tabs-bar';
 import { ConnectionForm } from './components/connection-form/connection-form';
 import { ScanPanel } from './components/scan-panel/scan-panel';
 import { GalleryToolbar } from './components/gallery-toolbar/gallery-toolbar';
@@ -13,7 +14,7 @@ import { SettingsPage } from './components/settings-page/settings-page';
 
 @Component({
     selector: 'app-root',
-    imports: [ConnectionForm, ScanPanel, GalleryToolbar, Gallery, QueuePanel, SettingsPage],
+    imports: [TabsBar, ConnectionForm, ScanPanel, GalleryToolbar, Gallery, QueuePanel, SettingsPage],
     templateUrl: './app.html',
     styleUrl: './app.scss',
 })
@@ -28,34 +29,35 @@ export class App {
     protected readonly bootstrapped = signal(false);
 
     constructor() {
+        // FilesService перезагружает галерею при смене активной вкладки (effect).
         void this.bootstrap();
     }
 
     private async bootstrap(): Promise<void> {
-        // Первичный снимок статуса, затем SSE.
+        // Первичный снимок всех сессий, затем SSE.
         try {
-            this.store.applyScan(await this.api.scanStatus());
+            const { items } = await this.api.sessions();
+            this.store.initSessions(items);
         } catch {
             /* сервер недоступен — SSE переподключится сам */
         }
         this.sse.connect({
-            onScan: (p) => this.store.applyScan(p),
-            onFound: (files) => {
-                this.store.applyFound(files);
-                if (this.store.autoRefresh()) void this.files.reloadAuto();
+            onSessions: (list) => this.store.applySessions(list),
+            onScan: (sid, p) => this.store.applyScan(sid, p),
+            onFound: (sid, files) => {
+                const wasActive = this.store.activeSid() === sid;
+                this.store.applyFound(sid, files);
+                if (wasActive && this.store.autoRefresh()) void this.files.reloadAuto();
             },
-            onQueue: (q) => this.store.queue.set(q),
+            onQueue: (sid, q) => this.store.applyQueue(sid, q),
         });
         try {
             this.store.serverConfig.set(await this.api.config());
         } catch {
             /* конфигурация не критична — останутся дефолты */
         }
-        try {
-            await this.files.loadPage(1);
-        } catch {
-            /* файлов может не быть — пустая галерея */
-        }
+        // initSessions уже выбрал активную вкладку; галерею подгрузит effect
+        // в FilesService (реагирует на смену activeSid).
         this.bootstrapped.set(true);
     }
 

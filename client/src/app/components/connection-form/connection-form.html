@@ -12,8 +12,6 @@
     />
 </div>
 <button class="btn btn-primary" type="button" (click)="connect()" [disabled]="busy() || url().trim() === ''">
-    @if (busy()) { Подключение… } @else { Подключить }
+    @if (busy()) { Подключение… } @else { Добавить сервер }
 </button>
-@if (store.connected()) {
-    <span class="chip ok mono">{{ store.connection()?.host }}:{{ store.connection()?.port }}</span>
-}
+<p class="hint">Каждый сервер открывается отдельной вкладкой — исследуйте несколько параллельно.</p>

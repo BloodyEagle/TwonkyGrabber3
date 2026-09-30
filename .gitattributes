@@ -1,0 +1,10 @@
+# Единые переводы строк (LF) во всех текстовых файлах репозитория,
+# чтобы не было предупреждений LF/CRLF при push/pull на Windows.
+* text=auto eol=lf
+
+# Бинарные файлы — без нормализации.
+*.ico binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary

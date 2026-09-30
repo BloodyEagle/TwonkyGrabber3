@@ -64,3 +64,12 @@
         </button>
     }
 </div>
+
+<div class="reset-block" title="Очищает списки скана/очереди этой сессии; файлы на диске не удаляются">
+    <span class="reset-title">Сброс:</span>
+    <label class="check"><input type="checkbox" [checked]="resetScan()" (change)="toggleResetScan($event)" /> скан</label>
+    <label class="check"><input type="checkbox" [checked]="resetQueue()" (change)="toggleResetQueue($event)" /> очередь</label>
+    <button class="btn btn-sm btn-danger" type="button" (click)="doReset()">
+        {{ confirmReset() ? 'Точно сбросить?' : 'Сбросить' }}
+    </button>
+</div>

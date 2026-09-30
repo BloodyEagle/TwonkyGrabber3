@@ -1,8 +1,10 @@
 <header class="app-header">
     <span class="title">Twonky Grabber</span>
-    <span class="conn-chip" [class.on]="storeRef.connected()">
-        {{ storeRef.connected() ? 'подключено' : 'нет подключения' }}
-    </span>
+    @if (storeRef.scan().connection; as conn) {
+        <span class="conn-chip on mono">{{ conn.host }}:{{ conn.port }}</span>
+    } @else {
+        <span class="conn-chip">нет подключения</span>
+    }
     <span class="spacer"></span>
     <button class="btn btn-secondary" type="button" (click)="toggleQueue()">
         Очередь
@@ -17,15 +19,26 @@
     @if (storeRef.settingsOpen()) {
         <app-settings-page />
     } @else {
-        <section class="panels">
-            <div class="panel">
-                <h3 class="panel-title">Подключение</h3>
-                <app-connection-form />
-            </div>
-            <div class="panel">
-                <app-scan-panel />
-            </div>
-        </section>
+        <app-tabs-bar />
+
+        @if (storeRef.activeSid() === null) {
+            <section class="panels">
+                <div class="panel">
+                    <h3 class="panel-title">Подключение</h3>
+                    <app-connection-form />
+                </div>
+                <div class="panel dim-panel">
+                    <h3 class="panel-title">Скан</h3>
+                    <p class="empty-note">Выберите вкладку сервера выше или подключите новый.</p>
+                </div>
+            </section>
+        } @else {
+            <section class="panels">
+                <div class="panel">
+                    <app-scan-panel />
+                </div>
+            </section>
+        }
 
         <section class="gallery-area">
             <app-gallery-toolbar />

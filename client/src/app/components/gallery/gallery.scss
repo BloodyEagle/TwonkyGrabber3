@@ -7,17 +7,25 @@
     gap: 12px;
 }
 
-.skeleton .img {
-    aspect-ratio: 5 / 4;
+/* Геометрия повторяет карточку файла (рамка 1px + img 5:4 + info-строка),
+   чтобы суммарная высота ряда совпадала и прокрутка не сдвигалась. */
+.skeleton {
+    border: 1px solid var(--border);
     border-radius: 8px;
+    overflow: hidden;
     background: var(--surface);
 }
 
+.skeleton .img {
+    aspect-ratio: 5 / 4;
+    background: var(--bg-inset);
+}
+
 .skeleton .line {
-    height: 12px;
-    margin-top: 8px;
+    height: 17px;
+    margin: 6px 8px;
     border-radius: 6px;
-    background: var(--surface);
+    background: var(--surface-hover);
 }
 
 .empty {

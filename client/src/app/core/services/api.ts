@@ -1,4 +1,4 @@
-﻿/** Контракты сервера (план, §3/§8) — только типы, без логики. */
+/** Контракты сервера (план, §3/§8) — только типы, без логики. */
 import { Injectable } from '@angular/core';
 
 export interface TwonkyConnection {
@@ -40,6 +40,8 @@ export interface ScanProgress {
     status: ScanStatus;
     reason: string | null;
     mode: 'seq' | 'delta' | null;
+    /** Текущее подключение (null — ещё не подключено); восстанавливается после рестарта. */
+    connection: TwonkyConnection | null;
     probed: number;
     found: number;
     foundImages: number;
@@ -106,6 +108,16 @@ export interface Settings {
     downloadDir: string;
 }
 
+/** Вкладка сервера: снимок сессии из GET/POST /api/sessions. */
+export interface SessionSummary {
+    id: string;
+    /** Подкаталог загрузок внутри DOWNLOAD_DIR. */
+    dir: string;
+    connection: TwonkyConnection | null;
+    scan: ScanProgress;
+    queue: { counts: QueueState['counts']; paused: boolean; autoAll: boolean };
+}
+
 /** Рантайм-конфигурация сервера (зеркало RuntimeConfig из server/src/config.ts). */
 export interface RuntimeConfig {
     START_NUMBER: number;
@@ -170,92 +182,116 @@ interface ApiError {
     reason: string;
 }
 
-/** REST-клиент /api (план, §8). Все запросы браузера идут только сюда. */
+/** REST-клиент /api (план, §8). Все запросы браузера идут только сюда.
+ *  Операции с сервером Twonky скоупятся сессией (sid — идентификатор вкладки). */
 @Injectable({ providedIn: 'root' })
 export class ApiService {
     /** URL превью через прокси; epoch — версия библиотеки против кэша браузера. */
-    thumbUrl(number: number, w: number, h: number, epoch: number): string {
-        return `/api/thumb?n=${number}&w=${w}&h=${h}&v=${epoch}`;
+    thumbUrl(sid: string, number: number, w: number, h: number, epoch: number): string {
+        return `/api/sessions/${sid}/thumb?n=${number}&w=${w}&h=${h}&v=${epoch}`;
     }
 
     /** URL оригинала (открытие полного изображения). */
-    originalUrl(number: number, epoch: number): string {
-        return `/api/thumb?n=${number}&orig=1&v=${epoch}`;
+    originalUrl(sid: string, number: number, epoch: number): string {
+        return `/api/sessions/${sid}/thumb?n=${number}&orig=1&v=${epoch}`;
     }
 
-    async connect(url: string): Promise<{ connection: TwonkyConnection }> {
-        return this.request<{ connection: TwonkyConnection }>('/api/connect', {
+    // --- сессии ---
+
+    async sessions(): Promise<{ items: SessionSummary[] }> {
+        return this.request<{ items: SessionSummary[] }>('/api/sessions');
+    }
+
+    /** Новая вкладка сервера: подключение + проверка доступности. */
+    async createSession(url: string): Promise<SessionSummary> {
+        const r = await this.request<{ ok: true; session: SessionSummary }>('/api/sessions', {
             method: 'POST',
             body: { url },
         });
+        return r.session;
     }
 
-    async scanStart(): Promise<ScanProgress> {
-        return this.request<ScanProgress>('/api/scan/start', { method: 'POST' });
+    async deleteSession(id: string): Promise<void> {
+        await this.request(`/api/sessions/${id}`, { method: 'DELETE' });
     }
 
-    async scanStop(): Promise<ScanProgress> {
-        return this.request<ScanProgress>('/api/scan/stop', { method: 'POST' });
+    // --- скан ---
+
+    async scanStart(sid: string): Promise<ScanProgress> {
+        return this.request<ScanProgress>(`/api/sessions/${sid}/scan/start`, { method: 'POST' });
     }
 
-    async scanStatus(): Promise<ScanProgress> {
-        return this.request<ScanProgress>('/api/scan/status');
+    async scanStop(sid: string): Promise<ScanProgress> {
+        return this.request<ScanProgress>(`/api/sessions/${sid}/scan/stop`, { method: 'POST' });
     }
 
-    async files(page: number, size: number, sort: 'asc' | 'desc', type: 'all' | 'image' | 'video'): Promise<FilesPage> {
+    async scanStatus(sid: string): Promise<ScanProgress> {
+        return this.request<ScanProgress>(`/api/sessions/${sid}/scan/status`);
+    }
+
+    // --- находки ---
+
+    async files(sid: string, page: number, size: number, sort: 'asc' | 'desc', type: 'all' | 'image' | 'video'): Promise<FilesPage> {
         const qs = `page=${page}&size=${size}&sort=${sort}&type=${type}`;
-        return this.request<FilesPage>(`/api/files?${qs}`);
+        return this.request<FilesPage>(`/api/sessions/${sid}/files?${qs}`);
     }
 
-    async queueAdd(numbers: number[]): Promise<number> {
-        const r = await this.request<{ added: number }>('/api/queue', {
+    // --- очередь ---
+
+    async queueAdd(sid: string, numbers: number[]): Promise<number> {
+        const r = await this.request<{ added: number }>(`/api/sessions/${sid}/queue`, {
             method: 'POST',
             body: { numbers },
         });
         return r.added;
     }
 
-    async queueAddAll(): Promise<number> {
-        const r = await this.request<{ added: number }>('/api/queue/all', { method: 'POST' });
+    async queueAddAll(sid: string): Promise<number> {
+        const r = await this.request<{ added: number }>(`/api/sessions/${sid}/queue/all`, { method: 'POST' });
         return r.added;
     }
 
-    async queuePause(): Promise<void> {
-        await this.request('/api/queue/pause', { method: 'POST' });
+    async queuePause(sid: string): Promise<void> {
+        await this.request(`/api/sessions/${sid}/queue/pause`, { method: 'POST' });
     }
 
-    async queueResume(): Promise<void> {
-        await this.request('/api/queue/resume', { method: 'POST' });
+    async queueResume(sid: string): Promise<void> {
+        await this.request(`/api/sessions/${sid}/queue/resume`, { method: 'POST' });
     }
 
-    async queueRetryFailed(): Promise<void> {
-        await this.request('/api/queue/retry-failed', { method: 'POST' });
+    async queueRetryFailed(sid: string): Promise<void> {
+        await this.request(`/api/sessions/${sid}/queue/retry-failed`, { method: 'POST' });
     }
 
-    async queueClearCompleted(): Promise<void> {
-        await this.request('/api/queue/clear-completed', { method: 'POST' });
+    async queueClearCompleted(sid: string): Promise<void> {
+        await this.request(`/api/sessions/${sid}/queue/clear-completed`, { method: 'POST' });
     }
 
-    async queueRemove(number: number): Promise<void> {
-        await this.request(`/api/queue/${number}`, { method: 'DELETE' });
+    async queueRemove(sid: string, number: number): Promise<void> {
+        await this.request(`/api/sessions/${sid}/queue/${number}`, { method: 'DELETE' });
     }
 
-    async queuePage(page: number, size: number): Promise<QueueState & QueuePage> {
+    async queuePage(sid: string, page: number, size: number): Promise<QueueState & QueuePage> {
         const qs = `page=${page}&size=${size}`;
-        return this.request<QueueState & QueuePage>(`/api/queue?${qs}`);
+        return this.request<QueueState & QueuePage>(`/api/sessions/${sid}/queue?${qs}`);
     }
 
-    async settings(): Promise<Settings> {
-        return this.request<Settings>('/api/settings');
+    // --- настройки сессии (загрузчик) ---
+
+    async settings(sid: string): Promise<Settings> {
+        return this.request<Settings>(`/api/sessions/${sid}/settings`);
     }
 
-    async applySettings(patch: Partial<Pick<Settings, 'threadsMode' | 'threadsValue' | 'autoAll'>>): Promise<Settings> {
-        return this.request<Settings>('/api/settings', { method: 'POST', body: patch });
+    async applySettings(sid: string, patch: Partial<Pick<Settings, 'threadsMode' | 'threadsValue' | 'autoAll'>>): Promise<Settings> {
+        return this.request<Settings>(`/api/sessions/${sid}/settings`, { method: 'POST', body: patch });
     }
 
-    async stateReset(scan: boolean, queue: boolean): Promise<void> {
-        await this.request('/api/state/reset', { method: 'POST', body: { scan, queue } });
+    /** Сброс скана/очереди сессии; подключение сохраняется. */
+    async stateReset(sid: string, scan: boolean, queue: boolean): Promise<void> {
+        await this.request(`/api/sessions/${sid}/state/reset`, { method: 'POST', body: { scan, queue } });
     }
+
+    // --- глобальная конфигурация ---
 
     async config(): Promise<ConfigSnapshot> {
         return this.request<ConfigSnapshot>('/api/config');

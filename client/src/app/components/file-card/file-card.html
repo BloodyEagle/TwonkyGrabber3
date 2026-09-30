@@ -1,6 +1,6 @@
 <div class="card" [class.selected]="selected()">
     <div class="img-zone" [style.aspect-ratio]="'5 / 4'">
-        <a class="open-original" [href]="originalHref()" target="_blank" rel="noopener" title="Открыть оригинал"></a>
+        <a class="open-original" [href]="originalHref()" target="_blank" rel="noopener" title="Открыть оригинал (через прокси)"></a>
         @if (!failed()) {
             <img
                 [src]="thumbSrc()"
@@ -40,6 +40,20 @@
                 <svg width="12" height="12" viewBox="0 0 16 16"><path d="M4 2l9 6-9 6z" fill="currentColor" /></svg>
             </span>
         }
+        <a
+            class="direct-link"
+            [href]="file().url"
+            target="_blank"
+            rel="noopener"
+            title="Открыть напрямую с сервера (без прокси)"
+            aria-label="Открыть напрямую с сервера (без прокси)"
+        >
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <path d="M9 2.5h4.5V7" stroke="currentColor" stroke-width="1.5" />
+                <path d="M13.5 2.5L7 9" stroke="currentColor" stroke-width="1.5" />
+                <path d="M11.5 9.5v3A1.5 1.5 0 0 1 10 14H4a1.5 1.5 0 0 1-1.5-1.5v-6A1.5 1.5 0 0 1 4 5h3" stroke="currentColor" stroke-width="1.5" />
+            </svg>
+        </a>
         <label class="check" title="Выбрать (Shift — диапазон)">
             <input
                 type="checkbox"

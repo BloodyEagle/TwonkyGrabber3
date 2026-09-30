@@ -64,6 +64,9 @@ export const SAVE_EVERY_MS = 5000;
 
 /** Задержка между ретраями записи state.json (Windows: EPERM на rename). */
 export const SAVE_RETRY_DELAY_MS = 300;
+
+/** Максимум одновременно исследуемых серверов (сессий). Не редактируется в рантайме. */
+export const MAX_SESSIONS = 16;
 export const SSE_SCAN_MS = 500;
 export const SSE_FOUND_FLUSH_MS = 500;
 export const SSE_QUEUE_MS = 1000;

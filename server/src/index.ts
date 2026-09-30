@@ -1,55 +1,25 @@
 /**
  * Точка входа сервера Twonky Grabber.
- * Собирает зависимости (сканер + загрузчик + хранилище состояния),
- * восстанавливает состояние при старте и подключает API-роутер.
+ * Мульти-серверная сборка: менеджер сессий (сканер + загрузчик на каждый Twonky),
+ * восстановление состояния при старте и подключение API-роутера.
  */
 import express from 'express';
 import type { Request, Response, NextFunction } from 'express';
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { DOWNLOAD_DIR, PORT, STATIC_ROOT, C, applyConfigPatch } from './config';
-import { probeUrl } from './lib/probe';
 import { fetchServerStats } from './lib/server-stats';
-import { fileUrl } from './lib/url-parser';
-import { Scanner } from './lib/scanner';
-import type { Prober } from './lib/scanner';
-import { Downloader, createNodeDownloaderDeps } from './lib/downloader';
+import { SessionManager } from './lib/sessions';
+import type { Session } from './lib/sessions';
 import { createApiRouter } from './lib/routes';
 import { Store } from './lib/store';
 import type { PersistedState } from './lib/store';
 
-// Пробер строит URL от текущего подключения сканера (связывание после создания,
-// чтобы избежать циклической ссылки в инициализаторе).
-let scannerRef: Scanner | null = null;
-
-const nodeProber: Prober = {
-    probe: (number) => {
-        const conn = scannerRef?.getConnection() ?? null;
-        if (conn === null) {
-            return Promise.resolve({
-                kind: 'neterr' as const,
-                media: null,
-                contentType: null,
-                size: null,
-                detail: 'нет подключения',
-            });
-        }
-        return probeUrl(fileUrl(conn, number));
-    },
-};
-
-const scanner = new Scanner(nodeProber);
-scannerRef = scanner;
-
-const downloader = new Downloader(createNodeDownloaderDeps(DOWNLOAD_DIR), scanner);
-// autoAll: новые находки автоматически попадают в очередь.
-scanner.addOnFound((files) => {
-    downloader.handleFound(files);
-});
+const manager = new SessionManager(DOWNLOAD_DIR);
 
 const app = express();
 app.use(express.json());
-app.use('/api', createApiRouter({ scanner, downloader }));
+app.use('/api', createApiRouter({ sessions: manager }));
 
 /** Каталоги сборки фронта: dist, dist/browser или dist/<name>/browser (план, §9).
  *  Базу ищем на двух уровнях: ../client/dist (запуск из src через tsx) и
@@ -97,11 +67,16 @@ if (clientRoot !== null) {
 
 const store = new Store();
 
-/** Снимок состояния для записи в state.json. */
+/** Снимок состояния для записи в state.json (версия 2 — все сессии). */
 const snapshot = (): PersistedState => ({
-    version: 1,
-    scan: scanner.serialize(),
-    queue: downloader.serialize(),
+    version: 2,
+    nextSessionId: manager.peekNextId(),
+    sessions: manager.list().map((s) => ({
+        id: s.id,
+        dir: s.dir,
+        scan: s.scanner.serialize(),
+        queue: s.downloader.serialize(),
+    })),
     config: structuredClone(C),
 });
 
@@ -110,32 +85,49 @@ const snapshot = (): PersistedState => ({
 void (async () => {
     const state = await store.load();
     if (state !== null) {
-        if (state.scan !== null) {
-            const wasRunning = scanner.restore(state.scan);
-            console.log(`[server] состояние восстановлено: найдено файлов — ${scanner.progress().found}`);
-            const conn = scanner.getConnection();
-            if (conn !== null) {
-                // Обновляем статистику сервера (для досрочной остановки).
-                void fetchServerStats(conn).then((stats) => {
-                    scanner.setServerTotals(stats);
-                });
-            }
-            if (wasRunning) {
-                const conn2 = scanner.getConnection();
-                if (conn2 !== null) {
-                    scanner.start(conn2);
-                    console.log('[server] скан был активен до перезапуска — продолжаем');
-                }
-            }
-        }
-        if (state.queue !== null) {
-            downloader.restore(state.queue);
-            console.log(`[server] очередь восстановлена: элементов — ${state.queue.items.length}`);
-        }
         if (state.config !== null) {
             applyConfigPatch(state.config as unknown as Record<string, unknown>);
             console.log('[server] конфигурация восстановлена из state.json');
         }
+        manager.setNextId(state.nextSessionId);
+        for (const saved of state.sessions) {
+            let session: Session;
+            try {
+                session = manager.create(saved.scan?.connection ?? null, { id: saved.id, dir: saved.dir });
+            } catch (err: unknown) {
+                console.warn(
+                    `[server] сессия ${saved.id} не восстановлена: ${err instanceof Error ? err.message : String(err)}`,
+                );
+                continue;
+            }
+            if (saved.scan !== null) {
+                const wasRunning = session.scanner.restore(saved.scan);
+                console.log(
+                    `[server] сессия ${saved.id} (${saved.dir}): найдено файлов — ${session.scanner.progress().found}`,
+                );
+                const conn = session.scanner.getConnection();
+                if (conn !== null) {
+                    // Обновляем статистику сервера (для досрочной остановки).
+                    void fetchServerStats(conn).then((stats) => {
+                        session.scanner.setServerTotals(stats);
+                    });
+                }
+                if (wasRunning) {
+                    const conn2 = session.scanner.getConnection();
+                    if (conn2 !== null) {
+                        session.scanner.start(conn2);
+                        console.log(`[server] сессия ${saved.id}: скан был активен до перезапуска — продолжаем`);
+                    }
+                }
+            }
+            if (saved.queue !== null) {
+                session.downloader.restore(saved.queue);
+                console.log(
+                    `[server] сессия ${saved.id}: очередь восстановлена — элементов ${saved.queue.items.length}`,
+                );
+            }
+        }
+        manager.bumpNextId(state.sessions.map((s) => s.id));
     }
     store.startAutoSave(snapshot);
 
@@ -148,7 +140,7 @@ void (async () => {
 // Сохранение состояния при завершении процесса (Ctrl+C, остановка менеджером).
 function shutdown(): void {
     store.stop();
-    downloader.dispose();
+    for (const s of manager.list()) s.downloader.dispose();
     void store.saveNow(snapshot()).finally(() => process.exit(0));
 }
 process.on('SIGINT', shutdown);

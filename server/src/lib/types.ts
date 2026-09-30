@@ -130,6 +130,8 @@ export interface ScanProgress {
     status: ScanStatus;
     reason: string | null;
     mode: ScanMode;
+    /** Текущее подключение (null — ещё не подключено); фронт восстанавливает его после рестарта. */
+    connection: TwonkyConnection | null;
     probed: number;
     found: number;
     /** Найдено изображений/видео по отдельности (для «найдено/всего» по типам). */

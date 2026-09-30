@@ -1,0 +1,34 @@
+<div class="tabs" role="tablist" aria-label="Серверы">
+    @for (tab of tabs(); track tab.id) {
+        <button
+            type="button"
+            role="tab"
+            class="tab"
+            [class.active]="storeRef.activeSid() === tab.id"
+            [class]="'tab ' + statusClass(tab)"
+            (click)="select(tab.id)"
+            [title]="'каталог загрузок: ' + tab.dir"
+        >
+            <span class="dot"></span>
+            <span class="label mono">{{ label(tab) }}</span>
+            @if (activeDownloads(tab) > 0) {
+                <span class="badge tnum">{{ activeDownloads(tab) }}</span>
+            }
+            <span
+                class="close"
+                role="button"
+                aria-label="Закрыть вкладку"
+                title="Убрать сервер (файлы на диске остаются)"
+                (click)="close(tab.id); $event.stopPropagation()"
+            >✕</span>
+        </button>
+    }
+    <button
+        type="button"
+        role="tab"
+        class="tab new"
+        [class.active]="storeRef.activeSid() === null"
+        (click)="selectNew()"
+        title="Подключить ещё один сервер"
+    >＋</button>
+</div>

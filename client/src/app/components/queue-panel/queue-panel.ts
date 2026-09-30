@@ -7,6 +7,7 @@ import { formatNumber, formatSize, formatSpeed } from '../../core/format';
 
 const QUEUE_PAGE_SIZE = 50;
 
+/** Панель очереди: показывает очередь активной сессии (как и остальной UI). */
 @Component({
     selector: 'app-queue-panel',
     imports: [FormsModule],
@@ -33,24 +34,29 @@ export class QueuePanel {
         this.store.queueOpen.set(false);
     }
 
+    /** Сессия для запросов и заголовка: активная (панель следует за выбранной вкладкой). */
+    protected sid(): string {
+        return this.store.activeSid() ?? '';
+    }
+
     protected async pause(): Promise<void> {
-        await this.guard(() => this.api.queuePause());
+        await this.guard(() => this.api.queuePause(this.sid()));
     }
 
     protected async resume(): Promise<void> {
-        await this.guard(() => this.api.queueResume());
+        await this.guard(() => this.api.queueResume(this.sid()));
     }
 
     protected async retryFailed(): Promise<void> {
-        await this.guard(() => this.api.queueRetryFailed());
+        await this.guard(() => this.api.queueRetryFailed(this.sid()));
     }
 
     protected async clearCompleted(): Promise<void> {
-        await this.guard(() => this.api.queueClearCompleted());
+        await this.guard(() => this.api.queueClearCompleted(this.sid()));
     }
 
     protected async remove(number: number): Promise<void> {
-        await this.guard(() => this.api.queueRemove(number));
+        await this.guard(() => this.api.queueRemove(this.sid(), number));
     }
 
     protected statusLabel(status: string): string {
@@ -75,9 +81,9 @@ export class QueuePanel {
 
     protected async setMode(mode: 'auto' | 'manual'): Promise<void> {
         if (mode === 'manual') {
-            await this.guard(() => this.api.applySettings({ threadsMode: 'manual', threadsValue: this.manualValue() }));
+            await this.guard(() => this.api.applySettings(this.sid(), { threadsMode: 'manual', threadsValue: this.manualValue() }));
         } else {
-            await this.guard(() => this.api.applySettings({ threadsMode: 'auto' }));
+            await this.guard(() => this.api.applySettings(this.sid(), { threadsMode: 'auto' }));
         }
     }
 
@@ -85,7 +91,7 @@ export class QueuePanel {
         const value = Number.parseInt((event.target as HTMLInputElement).value, 10);
         if (Number.isFinite(value)) {
             this.manualValue.set(value);
-            await this.guard(() => this.api.applySettings({ threadsValue: value }));
+            await this.guard(() => this.api.applySettings(this.sid(), { threadsValue: value }));
         }
     }
 
@@ -100,8 +106,12 @@ export class QueuePanel {
     }
 
     protected async loadPage(page: number): Promise<void> {
+        const sid = this.sid();
+        if (sid === '') return;
         try {
-            const r = await this.api.queuePage(page, QUEUE_PAGE_SIZE);
+            const r = await this.api.queuePage(sid, page, QUEUE_PAGE_SIZE);
+            // Вкладка могла смениться/закрыться за время запроса.
+            if (this.sid() !== sid) return;
             this.store.queue.set(r);
             this.store.queueItems.set(r.items);
             this.store.queueTotal.set(r.total);

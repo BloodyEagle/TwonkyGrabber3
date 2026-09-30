@@ -246,6 +246,25 @@ test('serialize/restore: находки и статус переносятся',
     );
 });
 
+test('restore активного скана → resume продолжает сканирование до конца', async () => {
+    // Задержка проб оставляет окно, чтобы сериализовать скан в состоянии scanning.
+    const first = new Scanner(new MockProber((n) => n >= 5000 && n <= 5255, 5));
+    first.start(conn());
+    await waitStatus(first, ['scanning']);
+
+    const state = first.serialize();
+    assert.ok(state !== null);
+
+    const second = new Scanner(new MockProber((n) => n >= 5000 && n <= 5255, 5));
+    const wasRunning = second.restore(state!);
+    assert.equal(wasRunning, true);
+    assert.equal(second.progress().status, 'paused');
+
+    second.resume();
+    await waitStatus(second, ['done'], 60_000);
+    assert.equal(second.progress().found, 256);
+});
+
 test('статистика сервера: найдено всё → досрочная остановка', async () => {
     const prober = new MockProber((n) => n >= 5000 && n <= 5009);
     const scanner = new Scanner(prober);

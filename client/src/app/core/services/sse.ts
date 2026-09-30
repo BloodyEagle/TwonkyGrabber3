@@ -1,13 +1,16 @@
 import { Injectable } from '@angular/core';
-import type { FoundFile, QueueState, ScanProgress } from './api';
+import type { FoundFile, QueueState, ScanProgress, SessionSummary } from './api';
 
 interface SseHandlers {
-    onScan: (progress: ScanProgress) => void;
-    onFound: (files: FoundFile[]) => void;
-    onQueue: (state: QueueState) => void;
+    /** Список сессий изменился (создание/удаление вкладки, тик скана). */
+    onSessions: (list: Pick<SessionSummary, 'id' | 'dir'>[]) => void;
+    onScan: (sid: string, progress: ScanProgress) => void;
+    onFound: (sid: string, files: FoundFile[]) => void;
+    onQueue: (sid: string, state: QueueState) => void;
 }
 
-/** SSE-подключение /api/events: снимок при подключении, автопереподключение EventSource. */
+/** SSE-подключение /api/events: снимок при подключении, автопереподключение EventSource.
+ *  Все события несут sid сессии (мульти-серверность). */
 @Injectable({ providedIn: 'root' })
 export class SseService {
     private source: EventSource | null = null;
@@ -16,12 +19,23 @@ export class SseService {
         this.disconnect();
         const es = new EventSource('/api/events');
         this.source = es;
-        es.addEventListener('scan', (ev) => handlers.onScan(this.parse<ScanProgress>(ev)));
-        es.addEventListener('found', (ev) => {
-            const files = this.parse<FoundFile[]>(ev);
-            if (files.length > 0) handlers.onFound(files);
+        es.addEventListener('sessions', (ev) => {
+            handlers.onSessions(this.parse<Pick<SessionSummary, 'id' | 'dir'>[]>(ev));
         });
-        es.addEventListener('queue', (ev) => handlers.onQueue(this.parse<QueueState>(ev)));
+        es.addEventListener('scan', (ev) => {
+            const payload = this.parse<{ sid: string } & ScanProgress>(ev);
+            const { sid, ...progress } = payload;
+            handlers.onScan(sid, progress);
+        });
+        es.addEventListener('found', (ev) => {
+            const payload = this.parse<{ sid: string; files: FoundFile[] }>(ev);
+            if (payload.files.length > 0) handlers.onFound(payload.sid, payload.files);
+        });
+        es.addEventListener('queue', (ev) => {
+            const payload = this.parse<{ sid: string } & QueueState>(ev);
+            const { sid, ...state } = payload;
+            handlers.onQueue(sid, state);
+        });
     }
 
     disconnect(): void {

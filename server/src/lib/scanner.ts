@@ -92,6 +92,8 @@ export class Scanner {
     private neterrStreak = 0;
     /** Инкрементируется в reset — живые циклы рук/разведки прерываются. */
     private generation = 0;
+    /** Циклы рук уже запущены (false после reset/restore — resume должен перезапустить их). */
+    private armLoopsRunning = false;
     private pausedFlag = false;
     private resumeWaiters: Array<() => void> = [];
     private readonly foundSinks: Array<(files: FoundFile[]) => void> = [];
@@ -164,6 +166,7 @@ export class Scanner {
             status: this.status,
             reason: this.reason,
             mode: this.mode,
+            connection: this.connection,
             probed: this.probed,
             found: this.foundMap.size,
             foundImages,
@@ -219,6 +222,7 @@ export class Scanner {
         this.reason = null;
         if (this.arms.length > 0) {
             this.status = 'scanning';
+            this.startArmLoops();
         } else if (this.lastDetectStart !== null) {
             // Пауза во время разведки после находки поиска — продолжаем от неё,
             // найденные файлы станут якорями (foundMap учитывается в detect).
@@ -264,6 +268,7 @@ export class Scanner {
         this.foundMap.clear();
         this.neterrStreak = 0;
         this.probeTimestamps = [];
+        this.armLoopsRunning = false;
     }
 
     /** Эпоха библиотеки: инкремент при сбросе — фронт вешает её на URL превью,
@@ -408,6 +413,7 @@ export class Scanner {
         this.mode = foundNumbers.length >= C.SEQ_THRESHOLD ? 'seq' : 'delta';
         this.arms = this.buildArms(this.mode, startN, foundNumbers);
         this.status = 'scanning';
+        this.armLoopsRunning = true;
         for (const arm of this.arms) {
             if (arm.state === 'run') void this.runArm(gen, arm);
         }
@@ -455,6 +461,16 @@ export class Scanner {
             arms.push(mk(-1, a - C.STEP_DELTA, C.STEP_DELTA));
         }
         return arms;
+    }
+
+    /** Запуск циклов рук, если ещё не запущены (после restore/resume). */
+    private startArmLoops(): void {
+        if (this.armLoopsRunning) return;
+        this.armLoopsRunning = true;
+        const gen = this.generation;
+        for (const arm of this.arms) {
+            if (arm.state === 'run') void this.runArm(gen, arm);
+        }
     }
 
     /** Цикл руки до остановки. */

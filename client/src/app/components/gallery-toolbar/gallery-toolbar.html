@@ -17,6 +17,11 @@
     <span class="total tnum">Найдено: {{ fmt(storeRef.filesTotal()) }}</span>
 
     <div class="pager tnum">
+        <select class="btn btn-sm" [ngModel]="storeRef.page()" [compareWith]="equalAsNumber" (ngModelChange)="goToPage($event)" aria-label="Перейти на страницу" title="Перейти на страницу">
+            @for (p of allPages(); track p) {
+                <option [ngValue]="p">{{ p }}</option>
+            }
+        </select>
         <button class="btn btn-sm btn-secondary" type="button" (click)="goToPage(storeRef.page() - 10)" [disabled]="storeRef.page() <= 10" aria-label="На 10 страниц назад" title="На 10 страниц назад">‹‹</button>
         <button class="btn btn-sm btn-secondary" type="button" (click)="goToPage(storeRef.page() - 1)" [disabled]="storeRef.page() <= 1" aria-label="Предыдущая страница">‹</button>
         @for (p of pages(); track p) {

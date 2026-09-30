@@ -14,8 +14,9 @@ export class Gallery {
     protected readonly thumb = computed(() => this.store.thumbSizes()[this.store.thumbSize()] ?? THUMB_SIZES.M);
     protected readonly cardWidth = computed(() => this.thumb().w + 16);
 
-    protected readonly skeletons = computed(() => {
-        const cols = Math.max(1, Math.floor(800 / this.cardWidth()));
-        return Array.from({ length: Math.min(cols * 2, 12) }, (_, i) => i);
-    });
+    /** Скелетонов — столько же, сколько карточек на странице: высота документа
+     *  при загрузке не меняется, и прокрутка не сбрасывается браузером. */
+    protected readonly skeletons = computed(() =>
+        Array.from({ length: this.store.pageSize() }, (_, i) => i),
+    );
 }

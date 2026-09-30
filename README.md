@@ -17,14 +17,15 @@ server/                     Express-сервер (TypeScript, CommonJS)
   src/lib/probe.ts          пробы: HEAD → GET Range fallback, ретраи
   src/lib/url-parser.ts     парсинг URL подключения
   src/lib/scanner.ts        сканер: seq/delta, руки, прыжки, sparse, gapfill, sweep
+  src/lib/sessions.ts       менеджер сессий: несколько Twonky-серверов параллельно
   src/lib/downloader.ts     очередь скачивания: пул потоков, докачка .part, нейминг _N
-  src/lib/routes.ts         REST /api/* + SSE (scan/found/queue)
-  src/lib/store.ts          state.json (атомарная запись, автосейв)
+  src/lib/routes.ts         REST /api/sessions/* + SSE (sessions/scan/found/queue)
+  src/lib/store.ts          state.json v2 (сессии, атомарная запись, автосейв)
   test/*.spec.ts            юнит-тесты (node:test, сеть замокана)
 client/                     Angular 20 (standalone, signals, SCSS, тёмная тема)
   src/app/core/services/    Api, Sse, StateStore, Files, Toast
-  src/app/components/       connection-form, scan-panel, gallery(-toolbar), file-card,
-                            queue-panel, settings-page
+  src/app/components/       tabs-bar, connection-form, scan-panel, gallery(-toolbar),
+                            file-card, queue-panel, settings-page
 plan.md                     детальный план и дизайн-система
 ```
 
@@ -108,6 +109,10 @@ run.cmd
 
 ## Поведение
 
+- **Несколько серверов**: каждый Twonky открывается отдельной вкладкой (кнопка «＋»).
+  Сканы и очереди скачивания всех серверов работают параллельно и независимо; счётчики
+  видны на вкладках (индикатор статуса + бейдж активных загрузок). Предел — 16 вкладок.
+  Скачанные файлы каждой сессии пишутся в свой подкаталог `downloads/<host>_<port>`.
 - **Подключение**: вставьте URL вида `http://host:9000/disk/O0$2$20I5000` — протокол, порт,
   путь и префикс опциональны (дефолты настраиваются).
 - **Скан**: разведка 256 номеров → режим seq (шаг 1) или delta (шаг 256); руки вперёд/назад,
@@ -118,9 +123,16 @@ run.cmd
 - **Очередь**: пул потоков 1..32 (авто-подстройка по скорости или ручной слайдер), докачка
   `.part` (Range), дедуп «уже скачан» (тот же размер), суффиксы `_1.._N` при коллизиях,
   пауза/резюм, повтор ошибок, очистка завершённых.
-- **Рестарт**: скан и очередь продолжаются с места (state.json, автопродолжение wasRunning).
-- **Сброс состояния** (Настройки): очищает списки скана/очереди, файлы на диске не трогает.
+- **Рестарт**: все сессии, их сканы и очереди продолжаются с места (state.json v2,
+  автопродолжение wasRunning); старый одиночный state.json v1 мигрируется автоматически.
+- **Сброс состояния** (кнопка в панели скана): очищает списки скана/очереди активной
+  сессии, файлы на диске не трогает; подключение сохраняется — можно сканировать заново.
 
 
 ## Адреса для проверки
-
+    http://213.93.173.16:50599/#photo
+    http://185.154.47.214:9000/disk/DLNA-PNJPEG_LRG-OP01-FLAGS00f00000/O0$2$20I179508.JPG
+    http://82.62.93.143:9000/disk/O0$2$20I5132
+    185.154.47.214:9000/disk/DLNA-PNJPEG_LRG-OP01-FLAGS00f00000/O0$2$20I179508.JPG
+    http://79.17.97.146:9001/
+    http://89.29.223.201:9000/disk/O0$2$20I7169804

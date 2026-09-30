@@ -4,6 +4,7 @@ import { ApiService } from '../../core/services/api';
 import { StateStore } from '../../core/services/state-store';
 import { ToastService } from '../../core/services/toast';
 
+/** Форма подключения нового Twonky-сервера (вкладка «＋»): создаёт сессию. */
 @Component({
     selector: 'app-connection-form',
     imports: [FormsModule],
@@ -12,7 +13,7 @@ import { ToastService } from '../../core/services/toast';
 })
 export class ConnectionForm {
     private readonly api = inject(ApiService);
-    protected readonly store = inject(StateStore);
+    private readonly store = inject(StateStore);
     private readonly toast = inject(ToastService);
 
     protected readonly url = signal('');
@@ -23,9 +24,11 @@ export class ConnectionForm {
         if (raw === '' || this.busy()) return;
         this.busy.set(true);
         try {
-            const r = await this.api.connect(raw);
-            this.store.connection.set(r.connection);
-            this.toast.show('success', 'Подключено');
+            const summary = await this.api.createSession(raw);
+            this.store.upsertSession(summary);
+            this.store.selectSession(summary.id);
+            this.toast.show('success', `Подключено: ${summary.connection?.host}:${summary.connection?.port}`);
+            // Галерею новой вкладки подгрузит effect в FilesService (смена activeSid).
         } catch (err: unknown) {
             this.toast.show('error', err instanceof Error ? err.message : String(err));
         } finally {

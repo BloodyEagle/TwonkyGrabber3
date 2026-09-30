@@ -1,14 +1,14 @@
 import { Component, computed, inject, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { ApiService, type ConfigSnapshot, type Settings } from '../../core/services/api';
-import { FilesService } from '../../core/services/files';
 import { StateStore } from '../../core/services/state-store';
 import { ToastService } from '../../core/services/toast';
 import { CONFIG_GROUPS } from '../../core/config-meta';
 
 type FormModel = Record<string, string>;
 
-/** Полная страница настроек: параметры сервера (/api/config), очередь, сброс, env. */
+/** Страница настроек: параметры сервера (глобально), очередь активной сессии, env.
+ *  Сброс состояния сессии перенесён в панель скана. */
 @Component({
     selector: 'app-settings-page',
     imports: [FormsModule],
@@ -17,9 +17,11 @@ type FormModel = Record<string, string>;
 })
 export class SettingsPage {
     private readonly api = inject(ApiService);
-    private readonly files = inject(FilesService);
     private readonly store = inject(StateStore);
     private readonly toast = inject(ToastService);
+
+    /** Активная сессия — для шаблона (заголовок блока очереди). */
+    protected readonly storeRef = this.store;
 
     protected readonly groups = CONFIG_GROUPS;
     protected readonly snapshot = signal<ConfigSnapshot | null>(null);
@@ -27,9 +29,6 @@ export class SettingsPage {
     protected readonly thumbW = signal<FormModel>({});
     protected readonly thumbH = signal<FormModel>({});
     protected readonly settings = signal<Settings | null>(null);
-    protected readonly resetScan = signal(true);
-    protected readonly resetQueue = signal(true);
-    protected readonly confirmReset = signal(false);
 
     constructor() {
         void this.load();
@@ -37,7 +36,13 @@ export class SettingsPage {
 
     protected readonly thumbKeys = computed(() => Object.keys(this.thumbW()));
 
+    /** Настройки загрузчика применяются к активной сессии. */
+    private sid(): string | null {
+        return this.store.activeSid();
+    }
+
     protected async load(): Promise<void> {
+        const sid = this.sid();
         try {
             const snap = await this.api.config();
             this.snapshot.set(snap);
@@ -57,7 +62,7 @@ export class SettingsPage {
             }
             this.thumbW.set(w);
             this.thumbH.set(h);
-            this.settings.set(await this.api.settings());
+            if (sid !== null) this.settings.set(await this.api.settings(sid));
         } catch (err: unknown) {
             this.toast.show('error', err instanceof Error ? err.message : String(err));
         }
@@ -146,25 +151,6 @@ export class SettingsPage {
         if (Number.isFinite(value)) await this.applySettings({ threadsValue: value });
     }
 
-    protected async doReset(): Promise<void> {
-        if (!this.confirmReset()) {
-            this.confirmReset.set(true);
-            return;
-        }
-        try {
-            await this.api.stateReset(this.resetScan(), this.resetQueue());
-            this.toast.show('success', 'Состояние сброшено');
-            this.confirmReset.set(false);
-            // Галерея и скан-панель — сразу в актуальное состояние (эпоха сменит URL превью).
-            this.store.clearSelection();
-            this.store.newFound.set(0);
-            this.store.applyScan(await this.api.scanStatus());
-            await this.files.loadPage(1);
-        } catch (err: unknown) {
-            this.toast.show('error', err instanceof Error ? err.message : String(err));
-        }
-    }
-
     protected defaultValue(key: string): string {
         const def = this.snapshot()?.defaults as Record<string, unknown> | undefined;
         if (def === undefined || !(key in def)) return '—';
@@ -177,8 +163,10 @@ export class SettingsPage {
     }
 
     private async applySettings(patch: Partial<Pick<Settings, 'threadsMode' | 'threadsValue' | 'autoAll'>>): Promise<void> {
+        const sid = this.sid();
+        if (sid === null) return;
         try {
-            this.settings.set(await this.api.applySettings(patch));
+            this.settings.set(await this.api.applySettings(sid, patch));
         } catch (err: unknown) {
             this.toast.show('error', err instanceof Error ? err.message : String(err));
         }

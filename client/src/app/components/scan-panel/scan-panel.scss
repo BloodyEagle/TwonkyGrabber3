@@ -126,3 +126,32 @@
     display: flex;
     gap: 8px;
 }
+
+/* Блок сброса состояния сессии (перенесён из настроек). */
+.reset-block {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    padding-top: 10px;
+    border-top: 1px dashed var(--border);
+    margin-top: 2px;
+}
+
+.reset-title {
+    color: var(--text-mute);
+    font-size: 12px;
+}
+
+.check {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    font-size: 12px;
+    color: var(--text-dim);
+}
+
+.check input {
+    accent-color: var(--accent);
+}

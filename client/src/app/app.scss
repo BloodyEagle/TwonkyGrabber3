@@ -76,6 +76,17 @@
     }
 }
 
+.dim-panel {
+    display: flex;
+    flex-direction: column;
+}
+
+.empty-note {
+    margin: 8px 0 0;
+    color: var(--text-mute);
+    font-size: 13px;
+}
+
 .gallery-area {
     display: flex;
     flex-direction: column;

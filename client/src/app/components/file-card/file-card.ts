@@ -26,9 +26,17 @@ export class FileCard {
 
     protected readonly selected = computed(() => this.store.selection().has(this.file().number));
     protected readonly thumbSrc = computed(() =>
-        this.api.thumbUrl(this.file().number, this.thumb().w, this.thumb().h, this.store.scan().epoch),
+        this.api.thumbUrl(
+            this.store.activeSid() ?? '',
+            this.file().number,
+            this.thumb().w,
+            this.thumb().h,
+            this.store.scan().epoch,
+        ),
     );
-    protected readonly originalHref = computed(() => this.api.originalUrl(this.file().number, this.store.scan().epoch));
+    protected readonly originalHref = computed(() =>
+        this.api.originalUrl(this.store.activeSid() ?? '', this.file().number, this.store.scan().epoch),
+    );
 
     protected onShiftClick(event: MouseEvent): void {
         event.preventDefault();

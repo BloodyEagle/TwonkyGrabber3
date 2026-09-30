@@ -1,59 +1,93 @@
 /**
- * REST + SSE маршруты API (план, п.8).
- * M2: /api/health, /api/connect, /api/scan/*, /api/events.
- * M3: /api/files.
- * M4: /api/queue*, /api/settings, /api/state/reset; SSE-событие queue.
+ * REST + SSE маршруты API (план, п.8) — мульти-серверная версия.
+ *
+ * Все операции с конкретным Twonky-сервером скоупятся сессией:
+ *   /api/sessions                       — список / создание / удаление
+ *   /api/sessions/:id/scan/*            — управление сканом
+ *   /api/sessions/:id/files, /thumb     — находки и превью
+ *   /api/sessions/:id/queue*            — очередь скачивания
+ *   /api/sessions/:id/settings          — настройки загрузчика сессии
+ *   /api/sessions/:id/state/reset       — сброс скана/очереди сессии
+ * Глобальны только /api/config и /api/events (SSE-события несут sid).
  */
 import { Router } from 'express';
 import type { Request, Response } from 'express';
-import { C, applyConfigPatch, configSnapshot } from '../config';
+import { C, applyConfigPatch, configSnapshot, MAX_SESSIONS } from '../config';
 import { checkAvailable } from './probe';
 import { fetchServerStats } from './server-stats';
 import { nodeTransport } from './http';
 import { fileUrl, parseConnectionUrl, thumbUrl } from './url-parser';
-import type { Scanner } from './scanner';
-import type { Downloader } from './downloader';
-import type { FoundFile } from './types';
+import type { Session, SessionManager } from './sessions';
+import type { FoundFile, QueueCounts, ScanProgress, TwonkyConnection } from './types';
 
 export interface ApiDeps {
-    scanner: Scanner;
-    downloader: Downloader;
+    sessions: SessionManager;
 }
 
-/** SSE-хаб: scan ~500 мс, found — батчами, queue ~1 с, heartbeat, снимок при подключении. */
+/** Краткое описание сессии для фронтенда (вкладка + первичный снимок). */
+export interface SessionSummary {
+    id: string;
+    dir: string;
+    connection: TwonkyConnection | null;
+    scan: ScanProgress;
+    queue: { counts: QueueCounts; paused: boolean; autoAll: boolean };
+}
+
+function sessionSummary(session: Session): SessionSummary {
+    const q = session.downloader.state();
+    return {
+        id: session.id,
+        dir: session.dir,
+        connection: session.scanner.getConnection(),
+        scan: session.scanner.progress(),
+        queue: { counts: q.counts, paused: q.paused, autoAll: q.autoAll },
+    };
+}
+
+/** SSE-хаб: sessions/scan ~500 мс, found — батчами по sid, queue ~1 с, heartbeat. */
 class SseHub {
     private readonly clients = new Set<Response>();
-    private foundBuffer: FoundFile[] = [];
+    private readonly foundBuffer = new Map<string, FoundFile[]>();
     private readonly timers: NodeJS.Timeout[] = [];
 
-    constructor(
-        private readonly scanner: Scanner,
-        private readonly downloader: Downloader,
-    ) {
-        scanner.addOnFound((files) => {
-            this.foundBuffer.push(...files);
+    constructor(private readonly sessions: SessionManager) {
+        sessions.addOnFound((session, files) => {
+            const buffer = this.foundBuffer.get(session.id) ?? [];
+            buffer.push(...files);
+            this.foundBuffer.set(session.id, buffer);
+        });
+        sessions.addOnChange(() => {
+            if (this.clients.size > 0) this.sendSnapshots();
         });
 
         this.timers.push(
             setInterval(() => {
-                if (this.clients.size > 0) this.sendAll('scan', scanner.progress());
+                if (this.clients.size > 0) this.sendScanTick();
             }, C.SSE_SCAN_MS),
         );
 
         this.timers.push(
             setInterval(() => {
-                if (this.clients.size > 0 && this.foundBuffer.length > 0) {
-                    const batch = this.foundBuffer;
-                    this.foundBuffer = [];
-                    this.sendAll('found', batch);
+                if (this.clients.size > 0) {
+                    for (const s of this.sessions.list()) {
+                        this.sendAll('queue', { sid: s.id, ...s.downloader.state() });
+                    }
                 }
-            }, C.SSE_FOUND_FLUSH_MS),
+            }, C.SSE_QUEUE_MS),
         );
 
         this.timers.push(
             setInterval(() => {
-                if (this.clients.size > 0) this.sendAll('queue', downloader.state());
-            }, C.SSE_QUEUE_MS),
+                if (this.clients.size === 0) {
+                    // Никто не слушает — найденное не накапливаем (и сессии могли удалиться).
+                    this.foundBuffer.clear();
+                    return;
+                }
+                for (const [sid, files] of this.foundBuffer) {
+                    if (files.length > 0) this.sendAll('found', { sid, files });
+                }
+                this.foundBuffer.clear();
+            }, C.SSE_FOUND_FLUSH_MS),
         );
 
         this.timers.push(
@@ -70,12 +104,32 @@ class SseHub {
             Connection: 'keep-alive',
         });
         // Снимок сразу при подключении.
-        this.send(res, 'scan', this.scanner.progress());
-        this.send(res, 'queue', this.downloader.state());
+        this.sendSnapshotsTo(res);
         this.clients.add(res);
         req.on('close', () => {
             this.clients.delete(res);
         });
+    }
+
+    /** Тик скана: прогресс каждой сессии (список рассылается только при изменении —
+     *  внутри одного SSE-сокета порядок событий гарантирован, гонок с тиками нет). */
+    private sendScanTick(): void {
+        for (const s of this.sessions.list()) {
+            this.sendAll('scan', { sid: s.id, ...s.scanner.progress() });
+        }
+    }
+
+    /** Полный снимок (подключение клиента / изменение списка сессий). */
+    private sendSnapshots(): void {
+        for (const res of this.clients) this.sendSnapshotsTo(res);
+    }
+
+    private sendSnapshotsTo(res: Response): void {
+        this.send(res, 'sessions', this.sessions.list().map((s) => ({ id: s.id, dir: s.dir })));
+        for (const s of this.sessions.list()) {
+            this.send(res, 'scan', { sid: s.id, ...s.scanner.progress() });
+            this.send(res, 'queue', { sid: s.id, ...s.downloader.state() });
+        }
     }
 
     private send(res: Response, event: string, data: unknown): void {
@@ -104,19 +158,37 @@ function queryToInt(value: unknown, def: number): number | null {
 
 /** Создание Express-роутера со всеми API. */
 export function createApiRouter(deps: ApiDeps): Router {
-    const { scanner, downloader } = deps;
+    const { sessions } = deps;
     const router = Router();
-    const hub = new SseHub(scanner, downloader);
+    const hub = new SseHub(sessions);
+
+    /** Сессия из :id или 404. */
+    const resolve = (id: string | undefined, res: Response): Session | null => {
+        const session = id === undefined ? null : sessions.get(id);
+        if (session === null) {
+            res.status(404).json({ ok: false, reason: 'Сессия не найдена — возможно, сервер уже убран' });
+            return null;
+        }
+        return session;
+    };
 
     router.get('/health', (_req, res) => {
         res.json({ ok: true });
     });
 
-    // Подключение к Twonky: парсинг URL + проверка доступности пробой на стартовый номер.
-    router.post('/connect', (req, res) => {
-        const status = scanner.progress().status;
-        if (status === 'detecting' || status === 'scanning') {
-            res.status(409).json({ ok: false, reason: 'Скан уже идёт — сначала остановите его' });
+    // --- Сессии (вкладки серверов) ---
+
+    router.get('/sessions', (_req, res) => {
+        res.json({ items: sessions.list().map(sessionSummary) });
+    });
+
+    // Новая вкладка сервера: парсинг URL + проверка доступности пробой на стартовый номер.
+    router.post('/sessions', (req, res) => {
+        if (sessions.count() >= MAX_SESSIONS) {
+            res.status(409).json({
+                ok: false,
+                reason: `Достигнут предел серверов (${MAX_SESSIONS}) — закройте лишние вкладки`,
+            });
             return;
         }
         const url = typeof req.body?.url === 'string' ? req.body.url : '';
@@ -132,38 +204,63 @@ export function createApiRouter(deps: ApiDeps): Router {
                 res.status(502).json({ ok: false, reason: 'Сервер недоступен по указанному адресу' });
                 return;
             }
-            scanner.setConnection(conn);
+            let session: Session;
+            try {
+                session = sessions.create(conn);
+            } catch (err: unknown) {
+                res.status(409).json({ ok: false, reason: err instanceof Error ? err.message : String(err) });
+                return;
+            }
             // Точные счётчики (/rpc/info_status) — для досрочной остановки скана.
             void fetchServerStats(conn).then((stats) => {
-                scanner.setServerTotals(stats);
+                session.scanner.setServerTotals(stats);
             });
-            res.json({ ok: true, connection: conn, exists: true });
+            res.json({ ok: true, session: sessionSummary(session) });
         });
     });
 
-    router.post('/scan/start', (_req, res) => {
-        const conn = scanner.getConnection();
-        if (conn === null) {
-            res.status(409).json({ ok: false, reason: 'Сначала подключитесь к серверу' });
+    router.delete('/sessions/:id', (req, res) => {
+        const ok = sessions.remove(req.params.id);
+        if (!ok) {
+            res.status(404).json({ ok: false, reason: 'Сессия не найдена' });
             return;
         }
-        scanner.start(conn);
-        const p = scanner.progress();
-        res.json({ ok: true, status: p.status, reason: p.reason });
+        res.json({ ok: true });
     });
 
-    router.post('/scan/stop', (_req, res) => {
-        scanner.stop();
-        const p = scanner.progress();
-        res.json({ ok: true, status: p.status, reason: p.reason });
+    // --- Скан ---
+
+    router.post('/sessions/:id/scan/start', (req, res) => {
+        const session = resolve(req.params.id, res);
+        if (session === null) return;
+        const conn = session.scanner.getConnection();
+        if (conn === null) {
+            res.status(409).json({ ok: false, reason: 'У сессии нет подключения' });
+            return;
+        }
+        session.scanner.start(conn);
+        res.json(session.scanner.progress());
     });
 
-    router.get('/scan/status', (_req, res) => {
-        res.json(scanner.progress());
+    router.post('/sessions/:id/scan/stop', (req, res) => {
+        const session = resolve(req.params.id, res);
+        if (session === null) return;
+        session.scanner.stop();
+        res.json(session.scanner.progress());
     });
+
+    router.get('/sessions/:id/scan/status', (req, res) => {
+        const session = resolve(req.params.id, res);
+        if (session === null) return;
+        res.json(session.scanner.progress());
+    });
+
+    // --- Находки ---
 
     // Список найденных файлов: пагинация, фильтр по типу, сортировка по номеру.
-    router.get('/files', (req, res) => {
+    router.get('/sessions/:id/files', (req, res) => {
+        const session = resolve(req.params.id, res);
+        if (session === null) return;
         const page = queryToInt(req.query.page, C.FILES_PAGE_DEFAULT);
         const size = queryToInt(req.query.size, C.FILES_PAGE_SIZE_DEFAULT);
         const sort = queryToString(req.query.sort) ?? 'asc';
@@ -185,7 +282,7 @@ export function createApiRouter(deps: ApiDeps): Router {
             return;
         }
         const clampedSize = Math.min(size, C.FILES_PAGE_SIZE_MAX);
-        const all = scanner.foundList();
+        const all = session.scanner.foundList();
         const filtered = type === 'all' ? all : all.filter((f) => f.kind === type);
         if (sort === 'desc') filtered.reverse();
         const start = (page - 1) * clampedSize;
@@ -197,7 +294,7 @@ export function createApiRouter(deps: ApiDeps): Router {
         });
     });
 
-    // --- Очередь скачивания (план, п.8) ---
+    // --- Превью ---
 
     /**
      * Отдать картинку по URL апстрима; false — ответ непригоден (не 200 / не image),
@@ -224,15 +321,17 @@ export function createApiRouter(deps: ApiDeps): Router {
         return true;
     };
 
-    router.get('/thumb', (req, res) => {
+    router.get('/sessions/:id/thumb', (req, res) => {
+        const session = resolve(req.params.id, res);
+        if (session === null) return;
         const n = Number.parseInt(String(queryToString(req.query.n) ?? ''), 10);
         if (!Number.isInteger(n) || n < 0) {
             res.status(400).json({ ok: false, reason: 'Параметр n обязателен (целое число)' });
             return;
         }
-        const conn = scanner.getConnection();
+        const conn = session.scanner.getConnection();
         if (conn === null) {
-            res.status(409).json({ ok: false, reason: 'Сначала подключитесь к серверу' });
+            res.status(409).json({ ok: false, reason: 'У сессии нет подключения' });
             return;
         }
         const orig = queryToString(req.query.orig) === '1';
@@ -275,50 +374,65 @@ export function createApiRouter(deps: ApiDeps): Router {
         })();
     });
 
+    // --- Очередь скачивания (план, п.8) ---
 
-    router.post('/queue', (req, res) => {
+    router.post('/sessions/:id/queue', (req, res) => {
+        const session = resolve(req.params.id, res);
+        if (session === null) return;
         const raw = req.body?.numbers;
         if (!Array.isArray(raw)) {
             res.status(400).json({ ok: false, reason: 'Ожидается массив numbers' });
             return;
         }
         const numbers = raw.filter((n): n is number => Number.isInteger(n));
-        const added = downloader.add(numbers);
+        const added = session.downloader.add(numbers);
         res.json({ ok: true, added });
     });
 
-    router.post('/queue/all', (_req, res) => {
-        const added = downloader.addAll();
+    router.post('/sessions/:id/queue/all', (req, res) => {
+        const session = resolve(req.params.id, res);
+        if (session === null) return;
+        const added = session.downloader.addAll();
         res.json({ ok: true, added });
     });
 
-    router.post('/queue/pause', (_req, res) => {
-        downloader.pause();
+    router.post('/sessions/:id/queue/pause', (req, res) => {
+        const session = resolve(req.params.id, res);
+        if (session === null) return;
+        session.downloader.pause();
         res.json({ ok: true });
     });
 
-    router.post('/queue/resume', (_req, res) => {
-        downloader.resume();
+    router.post('/sessions/:id/queue/resume', (req, res) => {
+        const session = resolve(req.params.id, res);
+        if (session === null) return;
+        session.downloader.resume();
         res.json({ ok: true });
     });
 
-    router.post('/queue/retry-failed', (_req, res) => {
-        downloader.retryFailed();
+    router.post('/sessions/:id/queue/retry-failed', (req, res) => {
+        const session = resolve(req.params.id, res);
+        if (session === null) return;
+        session.downloader.retryFailed();
         res.json({ ok: true });
     });
 
-    router.post('/queue/clear-completed', (_req, res) => {
-        downloader.clearCompleted();
+    router.post('/sessions/:id/queue/clear-completed', (req, res) => {
+        const session = resolve(req.params.id, res);
+        if (session === null) return;
+        session.downloader.clearCompleted();
         res.json({ ok: true });
     });
 
-    router.delete('/queue/:number', (req, res) => {
+    router.delete('/sessions/:id/queue/:number', (req, res) => {
+        const session = resolve(req.params.id, res);
+        if (session === null) return;
         const number = Number.parseInt(String(req.params.number), 10);
         if (!Number.isFinite(number)) {
             res.status(400).json({ ok: false, reason: 'Некорректный номер файла' });
             return;
         }
-        const result = downloader.remove(number);
+        const result = session.downloader.remove(number);
         if (result === null) {
             res.status(404).json({ ok: false, reason: 'Элемент очереди не найден' });
             return;
@@ -330,7 +444,9 @@ export function createApiRouter(deps: ApiDeps): Router {
         res.json({ ok: true });
     });
 
-    router.get('/queue', (req, res) => {
+    router.get('/sessions/:id/queue', (req, res) => {
+        const session = resolve(req.params.id, res);
+        if (session === null) return;
         const page = queryToInt(req.query.page, C.QUEUE_PAGE_DEFAULT);
         const size = queryToInt(req.query.size, C.QUEUE_PAGE_SIZE_DEFAULT);
         if (page === null || page < 1 || size === null || size < 1) {
@@ -338,10 +454,43 @@ export function createApiRouter(deps: ApiDeps): Router {
             return;
         }
         const clamped = Math.min(size, C.QUEUE_PAGE_SIZE_MAX);
-        res.json({ ...downloader.state(), ...downloader.itemsPage(page, clamped) });
+        res.json({ ...session.downloader.state(), ...session.downloader.itemsPage(page, clamped) });
     });
 
-    // --- Настройки и сброс состояния ---
+    // --- Настройки загрузчика сессии ---
+
+    router.get('/sessions/:id/settings', (req, res) => {
+        const session = resolve(req.params.id, res);
+        if (session === null) return;
+        res.json(session.downloader.settings());
+    });
+
+    router.post('/sessions/:id/settings', (req, res) => {
+        const session = resolve(req.params.id, res);
+        if (session === null) return;
+        session.downloader.applySettings(req.body ?? {});
+        res.json(session.downloader.settings());
+    });
+
+    // --- Сброс состояния сессии (подключение сохраняется — можно сканировать заново) ---
+
+    router.post('/sessions/:id/state/reset', (req, res) => {
+        const session = resolve(req.params.id, res);
+        if (session === null) return;
+        const body = req.body ?? {};
+        // Оба флага по умолчанию true; значения неверно типа трактуются как false.
+        const scan = body.scan === undefined ? true : body.scan === true;
+        const queue = body.queue === undefined ? true : body.queue === true;
+        if (scan) {
+            const conn = session.scanner.getConnection();
+            session.scanner.reset();
+            if (conn !== null) session.scanner.setConnection(conn);
+        }
+        if (queue) session.downloader.resetQueue();
+        res.json({ ok: true, ...sessionSummary(session) });
+    });
+
+    // --- Глобальная конфигурация ---
 
     router.get('/config', (_req, res) => {
         res.json(configSnapshot());
@@ -359,25 +508,6 @@ export function createApiRouter(deps: ApiDeps): Router {
             return;
         }
         res.json({ ok: true, ...configSnapshot() });
-    });
-
-    router.get('/settings', (_req, res) => {
-        res.json(downloader.settings());
-    });
-
-    router.post('/settings', (req, res) => {
-        downloader.applySettings(req.body ?? {});
-        res.json(downloader.settings());
-    });
-
-    router.post('/state/reset', (req, res) => {
-        const body = req.body ?? {};
-        // Оба флага по умолчанию true; значения неверно типа трактуются как false.
-        const scan = body.scan === undefined ? true : body.scan === true;
-        const queue = body.queue === undefined ? true : body.queue === true;
-        if (scan) scanner.reset();
-        if (queue) downloader.resetQueue();
-        res.json({ ok: true });
     });
 
     router.get('/events', (req, res) => {

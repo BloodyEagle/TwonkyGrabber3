@@ -1,21 +1,38 @@
-import { Injectable, inject } from '@angular/core';
+import { Injectable, effect, inject, untracked } from '@angular/core';
 import { ApiService } from './api';
 import { StateStore } from './state-store';
 
-/** Загрузка страниц галереи и обновление по SSE-находкам (план, §9). */
+/** Загрузка страниц галереи и обновление по SSE-находкам (план, §9).
+ *  Страницы всегда берутся у активной сессии (мульти-серверность). */
 @Injectable({ providedIn: 'root' })
 export class FilesService {
     private readonly api = inject(ApiService);
     private readonly store = inject(StateStore);
 
+    constructor() {
+        // Смена вкладки → перезагрузка страницы галереи новой активной сессии.
+        // untracked: loadPage читает sort/type/pageSize из стора — они не должны
+        // становиться зависимостями эффекта (иначе смена фильтра прыгала бы на стр. 1).
+        effect(() => {
+            const sid = this.store.activeSid();
+            if (sid !== null) untracked(() => void this.loadPage(1));
+        });
+    }
+
     /** Загрузить текущую страницу (page/size/sort/type из стора). */
     async loadPage(page?: number): Promise<void> {
+        const sid = this.store.activeSid();
+        if (sid === null) return;
         const target = page ?? this.store.page();
         this.store.filesLoading.set(true);
         try {
-            const r = await this.api.files(target, this.store.pageSize(), this.store.sort(), this.store.typeFilter());
+            const r = await this.api.files(sid, target, this.store.pageSize(), this.store.sort(), this.store.typeFilter());
+            // Вкладка могла смениться за время запроса — не затираем новую.
+            if (this.store.activeSid() !== sid) return;
             this.store.page.set(r.page);
             this.store.setFiles(r.items, r.total, true);
+        } catch {
+            /* сетевая ошибка — текущая страница остаётся как есть (SSE подхватит) */
         } finally {
             this.store.filesLoading.set(false);
         }
