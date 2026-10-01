@@ -10,6 +10,8 @@
 import { C } from '../config';
 import { buildFileName } from './mime';
 import { fileUrl } from './url-parser';
+import { probePool } from './pool';
+import { logWarn } from './log';
 import type { Arm, ArmDir, FoundFile, ScanMode, ScanProgress, ScanStatus, TwonkyConnection } from './types';
 import type { ProbeResult } from './probe';
 import type { ServerStats } from './server-stats';
@@ -26,7 +28,8 @@ export interface PersistedScanState {
     mode: ScanMode;
     probed: number;
     arms: Arm[];
-    found: FoundFile[];
+    /** Находки (опционально: в state.json не пишутся — хранятся в found-<id>.jsonl). */
+    found?: FoundFile[];
 }
 
 /** Позиция, запланированная на пробу в батче. */
@@ -35,28 +38,6 @@ interface BatchItem {
     /** Проба из очереди плотного прохода — не влияет на missStreak. */
     fromSweep: boolean;
     arm: Arm;
-}
-
-/** Семафор с ограничением параллельности. */
-class Semaphore {
-    private active = 0;
-    private readonly queue: Array<() => void> = [];
-
-    constructor(private readonly limit: number) {}
-
-    async run<T>(task: () => Promise<T>): Promise<T> {
-        if (this.active >= this.limit) {
-            await new Promise<void>((resolve) => this.queue.push(resolve));
-        }
-        this.active += 1;
-        try {
-            return await task();
-        } finally {
-            this.active -= 1;
-            const next = this.queue.shift();
-            if (next !== undefined) next();
-        }
-    }
 }
 
 /** Шаг разреженного поиска: случайный из [C.SPARSE_MIN..C.SPARSE_MAX], в delta — кратный шагу. */
@@ -89,6 +70,11 @@ export class Scanner {
     private arms: Arm[] = [];
     private readonly visited = new Set<number>();
     private readonly foundMap = new Map<number, FoundFile>();
+    /** Инкрементные счётчики типов (чтобы progress() не итерировал весь foundMap). */
+    private foundImagesCount = 0;
+    private foundVideosCount = 0;
+    /** Кэш отсортированного списка находок; null — требуется пересортировка. */
+    private sortedFoundCache: FoundFile[] | null = null;
     private neterrStreak = 0;
     /** Инкрементируется в reset — живые циклы рук/разведки прерываются. */
     private generation = 0;
@@ -98,7 +84,6 @@ export class Scanner {
     private resumeWaiters: Array<() => void> = [];
     private readonly foundSinks: Array<(files: FoundFile[]) => void> = [];
     private probeTimestamps: number[] = [];
-    private readonly sem = new Semaphore(C.PROBE_CONCURRENCY);
 
     constructor(private readonly prober: Prober) {}
 
@@ -138,11 +123,13 @@ export class Scanner {
 
     /** Число найденных image/video (музыку сканер не ищет). */
     private mediaFoundCount(): number {
-        let count = 0;
-        for (const f of this.foundMap.values()) {
-            if (f.kind === 'image' || f.kind === 'video') count += 1;
-        }
-        return count;
+        const { images, videos } = this.mediaCounts();
+        return images + videos;
+    }
+
+    /** Счётчики найденных фото/видео (инкрементальные поля). */
+    private mediaCounts(): { images: number; videos: number } {
+        return { images: this.foundImagesCount, videos: this.foundVideosCount };
     }
 
     getConnection(): TwonkyConnection | null {
@@ -156,12 +143,8 @@ export class Scanner {
 
     /** Текущий прогресс для фронта. */
     progress(): ScanProgress {
-        let foundImages = 0;
-        let foundVideos = 0;
-        for (const f of this.foundMap.values()) {
-            if (f.kind === 'image') foundImages += 1;
-            else if (f.kind === 'video') foundVideos += 1;
-        }
+        const foundImages = this.foundImagesCount;
+        const foundVideos = this.foundVideosCount;
         return {
             status: this.status,
             reason: this.reason,
@@ -185,9 +168,12 @@ export class Scanner {
         };
     }
 
-    /** Найденные файлы, отсортированные по номеру. */
+    /** Найденные файлы, отсортированные по номеру (кэш, пересобирается при новых находках). */
     foundList(): FoundFile[] {
-        return [...this.foundMap.values()].sort((a, b) => a.number - b.number);
+        if (this.sortedFoundCache === null) {
+            this.sortedFoundCache = [...this.foundMap.values()].sort((a, b) => a.number - b.number);
+        }
+        return this.sortedFoundCache;
     }
 
     /** Найденный файл по номеру (для постановки в очередь скачивания). */
@@ -266,6 +252,9 @@ export class Scanner {
         this.lastDetectStart = null;
         this.visited.clear();
         this.foundMap.clear();
+        this.foundImagesCount = 0;
+        this.foundVideosCount = 0;
+        this.sortedFoundCache = null;
         this.neterrStreak = 0;
         this.probeTimestamps = [];
         this.armLoopsRunning = false;
@@ -292,6 +281,18 @@ export class Scanner {
         };
     }
 
+    /** Метаданные скана без находок (пишутся в state.json; находки — отдельным JSONL). */
+    serializeMeta(): Omit<PersistedScanState, 'found'> | null {
+        if (this.connection === null) return null;
+        return {
+            connection: this.connection,
+            status: this.status,
+            mode: this.mode,
+            probed: this.probed,
+            arms: this.arms.map((a) => ({ ...a, sweepQueue: [...a.sweepQueue] })),
+        };
+    }
+
     /**
      * Восстановление после рестарта. Возвращает wasRunning: скан/разведка были активны.
      * Активный статус переводится в paused — автопродолжение решает владелец (M3).
@@ -302,12 +303,27 @@ export class Scanner {
         this.mode = state.mode;
         this.probed = state.probed;
         this.arms = state.arms.map((a) => ({ ...a, sweepQueue: [...a.sweepQueue] }));
-        for (const f of state.found) this.foundMap.set(f.number, f);
+        for (const f of state.found ?? []) {
+            this.foundMap.set(f.number, f);
+            if (f.kind === 'image') this.foundImagesCount += 1;
+            else if (f.kind === 'video') this.foundVideosCount += 1;
+        }
         const wasRunning = state.status === 'scanning' || state.status === 'detecting';
         this.status = wasRunning ? 'paused' : state.status;
         this.reason = wasRunning ? 'Остановлено перезапуском сервера' : null;
         // visited не сохраняется (план) — повторные пробои после рестарта допустимы.
         return wasRunning;
+    }
+
+    /** Заполнить находки после restore из внешнего источника (found-<id>.jsonl). */
+    restoreFound(found: FoundFile[]): void {
+        for (const f of found) {
+            if (this.foundMap.has(f.number)) continue;
+            this.foundMap.set(f.number, f);
+            if (f.kind === 'image') this.foundImagesCount += 1;
+            else if (f.kind === 'video') this.foundVideosCount += 1;
+        }
+        this.sortedFoundCache = null;
     }
 
     // --- внутреннее ---
@@ -344,11 +360,12 @@ export class Scanner {
         this.probed = 0;
         this.neterrStreak = 0;
         this.arms = [];
-        this.lastDetectStart = null;
         this.visited.clear();
         this.probeTimestamps = [];
         const conn = this.connection;
         if (conn === null) return;
+        // Запоминаем точку старта разведки — resume() продолжит с неё, а не перезапустит заново.
+        this.lastDetectStart = conn.startNumber;
         void this.detect(gen, conn).catch((err: unknown) => {
             this.status = 'error';
             this.reason = `Ошибка разведки: ${err instanceof Error ? err.message : String(err)}`;
@@ -374,7 +391,7 @@ export class Scanner {
                     foundNumbers.push(n);
                 }
             }
-            const results = await Promise.all(items.map((n) => this.sem.run(() => this.prober.probe(n))));
+            const results = await Promise.all(items.map((n) => probePool.run(() => this.prober.probe(n))));
             this.probed += items.length;
 
             const newFound: FoundFile[] = [];
@@ -599,7 +616,7 @@ export class Scanner {
     /** Выполнение батча проб с общим семафором и обработка результатов. */
     private async probeBatch(batch: BatchItem[]): Promise<void> {
         const results = await Promise.all(
-            batch.map((it) => this.sem.run(() => this.prober.probe(it.number))),
+            batch.map((it) => probePool.run(() => this.prober.probe(it.number))),
         );
         this.probed += batch.length;
 
@@ -700,9 +717,11 @@ export class Scanner {
         }
     }
 
-    /** Поставить в очередь плотный проход: 256 подряд идущих номеров вокруг находки. */
+    /** Поставить в очередь плотный проход: 256 подряд идущих номеров вокруг находки
+     *  (симметрично — независимо от направления руки, чтобы не оставлять «хвост»). */
     private enqueueSweep(arm: Arm, foundN: number): void {
-        const start = arm.dir === 1 ? foundN : foundN - (C.DETECT_BLOCK - 1);
+        const half = Math.floor(C.DETECT_BLOCK / 2);
+        const start = foundN - half;
         for (let k = 0; k < C.DETECT_BLOCK; k += 1) {
             const n = start + k;
             if (!outOfRange(n)) arm.sweepQueue.push(n);
@@ -732,15 +751,31 @@ export class Scanner {
             addedAt: Date.now(),
         };
         this.foundMap.set(n, file);
+        if (file.kind === 'image') this.foundImagesCount += 1;
+        else if (file.kind === 'video') this.foundVideosCount += 1;
+        this.sortedFoundCache = null;
         sink.push(file);
     }
 
-    /** Все руки остановлены → скан завершён. */
+    /** Все руки остановлены → скан завершён. Если статистика известна и библиотека
+     *  не полна — фиксируем причину досрочной остановки (а не молчаливый done). */
     private checkDone(): void {
         if (this.status !== 'scanning') return;
-        if (this.arms.length > 0 && this.arms.every((a) => a.state === 'stopped')) {
-            this.status = 'done';
+        if (this.arms.length === 0 || !this.arms.every((a) => a.state === 'stopped')) return;
+        this.status = 'done';
+        if (this.serverTotals === null) {
             this.reason = null;
+            return;
         }
+        const total = this.serverTotals.pictures + this.serverTotals.videos;
+        const { images, videos } = this.mediaCounts();
+        if (total > 0 && images + videos < total) {
+            this.reason =
+                `Остановлено досрочно: найдено ${images + videos} из ${total} ` +
+                `(фото ${images} из ${this.serverTotals.pictures}, видео ${videos} из ${this.serverTotals.videos})`;
+            logWarn('scan', this.reason);
+            return;
+        }
+        this.reason = null;
     }
 }

@@ -16,6 +16,7 @@ import { C, applyConfigPatch, configSnapshot, MAX_SESSIONS } from '../config';
 import { checkAvailable } from './probe';
 import { fetchServerStats } from './server-stats';
 import { nodeTransport } from './http';
+import { logError } from './log';
 import { fileUrl, parseConnectionUrl, thumbUrl } from './url-parser';
 import type { Session, SessionManager } from './sessions';
 import type { FoundFile, QueueCounts, ScanProgress, TwonkyConnection } from './types';
@@ -284,13 +285,14 @@ export function createApiRouter(deps: ApiDeps): Router {
         const clampedSize = Math.min(size, C.FILES_PAGE_SIZE_MAX);
         const all = session.scanner.foundList();
         const filtered = type === 'all' ? all : all.filter((f) => f.kind === type);
-        if (sort === 'desc') filtered.reverse();
+        // Копия под reverse — foundList() возвращает кэш сканера, мутировать его нельзя.
+        const items = sort === 'desc' ? [...filtered].reverse() : filtered;
         const start = (page - 1) * clampedSize;
         res.json({
-            total: filtered.length,
+            total: items.length,
             page,
             size: clampedSize,
-            items: filtered.slice(start, start + clampedSize),
+            items: items.slice(start, start + clampedSize),
         });
     });
 
@@ -337,6 +339,7 @@ export function createApiRouter(deps: ApiDeps): Router {
         const orig = queryToString(req.query.orig) === '1';
 
         const failNeterr = (err: unknown): void => {
+            logError('thumb', `сервер недоступен при запросе превью #${n}`, err);
             res.status(502).json({
                 ok: false,
                 reason: `Сервер недоступен: ${err instanceof Error ? err.message : String(err)}`,

@@ -13,8 +13,11 @@
  *
  * Зависимости внедряются (DownloaderDeps) — сеть в юнит-тестах запрещена.
  */
-import { C } from '../config';
+import { createHash } from 'node:crypto';
+import type { FileHandle } from 'node:fs/promises';
+import { C, FINGERPRINT_BYTES } from '../config';
 import { nodeTransport } from './http';
+import { logError } from './log';
 import type { HttpStreamOptions, HttpStreamResponse } from './http';
 import { buildFileName } from './mime';
 import { probeUrl } from './probe';
@@ -39,6 +42,10 @@ export interface DownloaderDeps {
     write(path: string, append: boolean): NodeJS.WritableStream;
     rename(from: string, to: string): Promise<void>;
     mkdirp(path: string): Promise<void>;
+    /** Читает сохранённый фингерпринт файла (null — нет сайдкара). */
+    readFingerprint?(fileName: string): Promise<FileFingerprint | null>;
+    /** Считает фингерпринт локального файла и сохраняет его в sidecar. */
+    storeFingerprint?(fileName: string, size: number): Promise<void>;
     sleep?: (ms: number) => Promise<void>;
     now?: () => number;
 }
@@ -48,6 +55,23 @@ export type SaveTarget =
     | { action: 'skip'; savedAs: string; note: string }
     | { action: 'write'; fileName: string }
     | { action: 'fail'; error: string };
+
+/** Фингерпринт файла: размер + хэши первых/последних FINGERPRINT_BYTES байт. */
+export interface FileFingerprint {
+    size: number;
+    head: string;
+    tail: string;
+}
+
+/** Контекст сверки контента при дедупе (опционально — по умолчанию только размер). */
+export interface FingerprintCheck {
+    fetchRemote: () => Promise<FileFingerprint | null>;
+    read: (fileName: string) => Promise<FileFingerprint | null>;
+}
+
+function hashBuffer(buf: Buffer): string {
+    return createHash('sha256').update(buf).digest('hex');
+}
 
 /**
  * Выбор целевого имени: без суффикса → _1.._NAME_SUFFIX_LIMIT.
@@ -59,6 +83,7 @@ export async function resolveSaveTarget(
     baseName: string,
     name: string,
     size: number,
+    fp?: FingerprintCheck,
 ): Promise<SaveTarget> {
     // Расширение с точкой — всё, что в name после baseName.
     const ext = name.substring(baseName.length);
@@ -70,6 +95,20 @@ export async function resolveSaveTarget(
             return { action: 'write', fileName };
         }
         if (existing === size) {
+            // Размер совпал. Если есть сохранённый фингерпринт — сверяем контент:
+            // при отличии считаем «не скачан» и уходим на следующий суффикс.
+            if (fp !== undefined) {
+                const stored = await fp.read(fileName);
+                if (stored !== null) {
+                    const remote = await fp.fetchRemote();
+                    if (
+                        remote !== null &&
+                        (stored.head !== remote.head || stored.tail !== remote.tail || stored.size !== remote.size)
+                    ) {
+                        continue;
+                    }
+                }
+            }
             return { action: 'skip', savedAs: fileName, note: 'уже скачан' };
         }
     }
@@ -123,6 +162,11 @@ export class Downloader {
     private failsInInterval = 0;
     private adjustT0: number;
     private dirReady = false;
+    /** Число элементов в статусе pending (кэш, чтобы не сканировать order на каждый pump). */
+    private pendingCountValue = 0;
+    /** FIFO-очередь pending-номеров; pendingHead — указатель на голову (без shift O(n)). */
+    private readonly pendingQueue: number[] = [];
+    private pendingHead = 0;
     private readonly adjustTimer: NodeJS.Timeout;
 
     constructor(
@@ -172,6 +216,7 @@ export class Downloader {
                 addedAt: this.now(),
             });
             this.order.push(n);
+            this.enqueuePending(n);
             added += 1;
         }
         if (added > 0) this.pump();
@@ -208,6 +253,7 @@ export class Downloader {
                 item.status = 'pending';
                 item.error = null;
                 item.note = null;
+                this.enqueuePending(n);
             }
         }
         this.pump();
@@ -229,7 +275,10 @@ export class Downloader {
 
     private dropWhere(pred: (item: QueueItem) => boolean): void {
         for (const [n, item] of this.items) {
-            if (pred(item)) this.items.delete(n);
+            if (pred(item)) {
+                if (item.status === 'pending') this.pendingCountValue -= 1;
+                this.items.delete(n);
+            }
         }
         for (let i = this.order.length - 1; i >= 0; i -= 1) {
             const n = this.order[i];
@@ -241,6 +290,9 @@ export class Downloader {
     resetQueue(): void {
         this.items.clear();
         this.order.length = 0;
+        this.pendingQueue.length = 0;
+        this.pendingHead = 0;
+        this.pendingCountValue = 0;
         this.autoAllFlag = false;
         this.pausedFlag = false;
     }
@@ -334,6 +386,7 @@ export class Downloader {
             const restored: QueueItem = item.status === 'active' ? { ...item, status: 'pending' } : { ...item };
             this.items.set(restored.number, restored);
             this.order.push(restored.number);
+            if (restored.status === 'pending') this.enqueuePending(restored.number);
         }
         this.threadsMode = state.threadsMode === 'manual' ? 'manual' : 'auto';
         this.manual = clampThreads(state.manual);
@@ -347,12 +400,27 @@ export class Downloader {
     // --- внутреннее: пул воркеров ---
 
     private pendingCount(): number {
-        let count = 0;
-        for (const n of this.order) {
+        return this.pendingCountValue;
+    }
+
+    /** Поставить номер в FIFO-очередь pending и увеличить счётчик. */
+    private enqueuePending(n: number): void {
+        this.pendingQueue.push(n);
+        this.pendingCountValue += 1;
+    }
+
+    /** Взять первый актуальный pending из очереди (пропускает уже обработанные/удалённые). */
+    private dequeuePending(): QueueItem | null {
+        while (this.pendingHead < this.pendingQueue.length) {
+            const n = this.pendingQueue[this.pendingHead] ?? -1;
+            this.pendingHead += 1;
             const item = this.items.get(n);
-            if (item !== undefined && item.status === 'pending') count += 1;
+            if (item !== undefined && item.status === 'pending') return item;
         }
-        return count;
+        // Очередь исчерпана — компактируем.
+        this.pendingQueue.length = 0;
+        this.pendingHead = 0;
+        return null;
     }
 
     private pump(): void {
@@ -377,11 +445,7 @@ export class Downloader {
     }
 
     private takeNext(): QueueItem | null {
-        for (const n of this.order) {
-            const item = this.items.get(n);
-            if (item !== undefined && item.status === 'pending') return item;
-        }
-        return null;
+        return this.dequeuePending();
     }
 
     /** Подстройка потоков: раз в C.DL_ADJUST_MS по скорости и отказам (план, п.6). */
@@ -411,7 +475,67 @@ export class Downloader {
 
     // --- скачивание одного файла ---
 
+    /** Контекст сверки фингерпринта (undefined → дедуп только по размеру). */
+    private buildFingerprintCheck(url: string, size: number): FingerprintCheck | undefined {
+        if (this.deps.readFingerprint === undefined) return undefined;
+        let remote: Promise<FileFingerprint | null> | null = null;
+        return {
+            fetchRemote: () => (remote ??= this.fetchRemoteFingerprint(url, size)),
+            read: (fileName) => this.deps.readFingerprint!(fileName),
+        };
+    }
+
+    /** Сохранить фингерпринт локального файла после успешного скачивания. */
+    private async storeFingerprint(fileName: string, size: number): Promise<void> {
+        if (this.deps.storeFingerprint === undefined) return;
+        try {
+            await this.deps.storeFingerprint(fileName, size);
+        } catch {
+            /* сбой записи фингерпринта не критичен для скачивания */
+        }
+    }
+
+    /** Фингерпринт удалённого файла: хэши первых/последних FINGERPRINT_BYTES байт. */
+    private async fetchRemoteFingerprint(url: string, size: number): Promise<FileFingerprint | null> {
+        try {
+            const head = await this.readRange(url, `bytes=0-${FINGERPRINT_BYTES - 1}`);
+            let tail = head;
+            if (size > FINGERPRINT_BYTES) {
+                tail = await this.readRange(url, `bytes=${size - FINGERPRINT_BYTES}-${size - 1}`);
+            }
+            return { size, head: hashBuffer(head), tail: hashBuffer(tail) };
+        } catch {
+            return null;
+        }
+    }
+
+    /** Чтение ограниченного диапазона ответа (до FINGERPRINT_BYTES байт). */
+    private async readRange(url: string, range: string): Promise<Buffer> {
+        const res = await this.deps.stream(url, { headers: { Range: range }, idleTimeoutMs: C.PROBE_TIMEOUT });
+        if (res.status !== 200 && res.status !== 206) {
+            res.stream.destroy();
+            throw new Error(`HTTP ${res.status}`);
+        }
+        const chunks: Buffer[] = [];
+        let received = 0;
+        return await new Promise<Buffer>((resolve, reject) => {
+            res.stream.on('data', (chunk: Buffer) => {
+                const take = Math.min(chunk.length, FINGERPRINT_BYTES - received);
+                if (take > 0) chunks.push(chunk.subarray(0, take));
+                received += chunk.length;
+                if (received >= FINGERPRINT_BYTES) {
+                    res.stream.destroy();
+                    resolve(Buffer.concat(chunks));
+                }
+            });
+            res.stream.on('end', () => resolve(Buffer.concat(chunks)));
+            res.stream.on('error', (err: unknown) => reject(err instanceof Error ? err : new Error(String(err))));
+            (res.stream as NodeJS.ReadableStream & { resume(): void }).resume();
+        });
+    }
+
     private async downloadItem(item: QueueItem): Promise<void> {
+        if (item.status === 'pending') this.pendingCountValue -= 1;
         item.status = 'active';
         item.error = null;
         item.note = null;
@@ -430,12 +554,15 @@ export class Downloader {
             item.size = size;
             item.name = buildFileName(item.baseName, contentType);
 
+            const fp = this.buildFingerprintCheck(item.url, size);
+
             const target = await resolveSaveTarget(
                 this.deps.sizeOf,
                 this.deps.downloadDir,
                 item.baseName,
                 item.name,
                 size,
+                fp,
             );
             if (target.action === 'skip') {
                 item.status = 'skipped';
@@ -449,10 +576,12 @@ export class Downloader {
             await this.transferWithRetries(item, target.fileName, size);
             item.status = 'done';
             item.savedAs = target.fileName;
+            await this.storeFingerprint(target.fileName, size);
         } catch (err: unknown) {
             item.status = 'failed';
             item.error = err instanceof Error ? err.message : String(err);
             this.failsInInterval += 1;
+            logError('download', `не удалось скачать #${item.number} (${item.url})`, err);
         }
     }
 
@@ -583,6 +712,45 @@ export function createNodeDownloaderDeps(downloadDir: string): DownloaderDeps {
         rename: (from, to) => fsPromises.rename(from, to),
         mkdirp: async (path) => {
             await fsPromises.mkdir(path, { recursive: true });
+        },
+        readFingerprint: async (fileName) => {
+            try {
+                const raw = await fsPromises.readFile(join(downloadDir, `${fileName}.fp`), 'utf8');
+                const parsed = JSON.parse(raw) as FileFingerprint;
+                if (
+                    typeof parsed.size === 'number' &&
+                    typeof parsed.head === 'string' &&
+                    typeof parsed.tail === 'string'
+                ) {
+                    return parsed;
+                }
+                return null;
+            } catch {
+                return null;
+            }
+        },
+        storeFingerprint: async (fileName, size) => {
+            const path = join(downloadDir, fileName);
+            let fh: FileHandle;
+            try {
+                fh = await fsPromises.open(path, 'r');
+            } catch {
+                return;
+            }
+            try {
+                const headLen = Math.min(FINGERPRINT_BYTES, Math.max(0, size));
+                const head = Buffer.alloc(headLen);
+                await fh.read(head, 0, headLen, 0);
+                let tail = head;
+                if (size > FINGERPRINT_BYTES) {
+                    tail = Buffer.alloc(FINGERPRINT_BYTES);
+                    await fh.read(tail, 0, FINGERPRINT_BYTES, size - FINGERPRINT_BYTES);
+                }
+                const fp: FileFingerprint = { size, head: hashBuffer(head), tail: hashBuffer(tail) };
+                await fsPromises.writeFile(`${path}.fp`, JSON.stringify(fp), 'utf8');
+            } finally {
+                await fh.close();
+            }
         },
     };
 }

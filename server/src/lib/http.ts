@@ -10,6 +10,7 @@
 import http from 'node:http';
 import https from 'node:https';
 import type {IncomingHttpHeaders} from 'node:http';
+import { httpAgent, httpsAgent } from './pool';
 
 /** Ошибка транспорта: таймаут, обрыв, DNS — всё, что не является HTTP-ответом. */
 export class NetworkError extends Error {
@@ -88,6 +89,8 @@ export const nodeTransport: HttpTransport = {
             };
             // Игнорируем просроченные/самоподписанные сертификаты Twonky.
             if (isHttps) (reqOptions as https.RequestOptions).rejectUnauthorized = false;
+            // Общий пул с ограничением сокетов (plan §Bugs, п.3).
+            (reqOptions as http.RequestOptions).agent = isHttps ? httpsAgent : httpAgent;
 
             const fail = (err: unknown): void => {
                 if (err instanceof NetworkError) reject(err);
@@ -159,6 +162,8 @@ export const nodeTransport: HttpTransport = {
             };
             // Игнорируем просроченные/самоподписанные сертификаты Twonky.
             if (isHttps) (reqOptions as https.RequestOptions).rejectUnauthorized = false;
+            // Общий пул с ограничением сокетов (plan §Bugs, п.3).
+            (reqOptions as http.RequestOptions).agent = isHttps ? httpsAgent : httpAgent;
 
             const fail = (err: unknown): void => {
                 if (err instanceof NetworkError) reject(err);

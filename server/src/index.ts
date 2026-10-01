@@ -6,12 +6,14 @@
 import express from 'express';
 import type { Request, Response, NextFunction } from 'express';
 import { existsSync } from 'node:fs';
-import { join, resolve } from 'node:path';
-import { DOWNLOAD_DIR, PORT, STATIC_ROOT, C, applyConfigPatch } from './config';
+import { dirname, join, resolve } from 'node:path';
+import { DOWNLOAD_DIR, PORT, STATIC_ROOT, STATE_FILE, C, applyConfigPatch } from './config';
 import { fetchServerStats } from './lib/server-stats';
 import { SessionManager } from './lib/sessions';
 import type { Session } from './lib/sessions';
 import { createApiRouter } from './lib/routes';
+import { logError } from './lib/log';
+import { FoundLog } from './lib/found-log';
 import { Store } from './lib/store';
 import type { PersistedState } from './lib/store';
 
@@ -65,16 +67,27 @@ if (clientRoot !== null) {
     console.log('[server] сборка фронтенда не найдена — работает только API');
 }
 
-const store = new Store();
+// Обработчик ошибок Express (4-аргументный): логирует и отдаёт 500, не роняя процесс.
+app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+    logError('http', 'необработанная ошибка маршрута', err);
+    if (!res.headersSent) res.status(500).json({ ok: false, reason: 'Внутренняя ошибка сервера' });
+});
 
-/** Снимок состояния для записи в state.json (версия 2 — все сессии). */
+const store = new Store();
+// Находки — append-only JSONL (state.json остаётся маленьким, без O(n) перезаписи).
+const foundLog = new FoundLog(dirname(STATE_FILE));
+// Находки дописываются по мере поступления; лог чистится при закрытии вкладки.
+manager.addOnFound((session, files) => foundLog.append(session.id, files));
+manager.addOnRemove((id) => void foundLog.remove(id));
+
+/** Снимок состояния для записи в state.json (версия 2 — все сессии, без списка находок). */
 const snapshot = (): PersistedState => ({
     version: 2,
     nextSessionId: manager.peekNextId(),
     sessions: manager.list().map((s) => ({
         id: s.id,
         dir: s.dir,
-        scan: s.scanner.serialize(),
+        scan: s.scanner.serializeMeta(),
         queue: s.downloader.serialize(),
     })),
     config: structuredClone(C),
@@ -101,7 +114,18 @@ void (async () => {
                 continue;
             }
             if (saved.scan !== null) {
-                const wasRunning = session.scanner.restore(saved.scan);
+                // Находки — в found-<id>.jsonl; из state.json берём только метаданные скана.
+                const scan = saved.scan;
+                const embeddedFound = scan.found ?? [];
+                const wasRunning = session.scanner.restore({ ...scan, found: undefined });
+                let found = await foundLog.load(saved.id);
+                if (found.length === 0 && embeddedFound.length > 0) {
+                    // Миграция v2 (found в state.json) → JSONL.
+                    await foundLog.append(saved.id, embeddedFound);
+                    await foundLog.flush(saved.id);
+                    found = embeddedFound;
+                }
+                if (found.length > 0) session.scanner.restoreFound(found);
                 console.log(
                     `[server] сессия ${saved.id} (${saved.dir}): найдено файлов — ${session.scanner.progress().found}`,
                 );
@@ -129,7 +153,10 @@ void (async () => {
         }
         manager.bumpNextId(state.sessions.map((s) => s.id));
     }
-    store.startAutoSave(snapshot);
+    store.startAutoSave(() => {
+        void foundLog.flush();
+        return snapshot();
+    });
 
     app.listen(PORT, () => {
         // Тексты логов — на русском, чтобы совпадать с языком проекта.
@@ -141,7 +168,16 @@ void (async () => {
 function shutdown(): void {
     store.stop();
     for (const s of manager.list()) s.downloader.dispose();
-    void store.saveNow(snapshot()).finally(() => process.exit(0));
+    void (async () => {
+        await foundLog.flush();
+        await store.saveNow(snapshot());
+        process.exit(0);
+    })();
 }
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
+
+// Незавершённые промисы (напр. не-awaited fetchServerStats) — в лог, а не молча в пропасть.
+process.on('unhandledRejection', (reason: unknown) => {
+    logError('process', 'unhandled rejection', reason);
+});

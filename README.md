@@ -13,7 +13,7 @@
 server/                     Express-сервер (TypeScript, CommonJS)
   src/config.ts             все параметры (+ рантайм-конфигурация C, GET/POST /api/config)
   src/index.ts              сборка зависимостей, восстановление состояния, раздача фронта
-  src/lib/http.ts           транспорт на node:http/https (rejectUnauthorized: false)
+  src/lib/http.ts           транспорт на node:http/https (rejectUnauthorized: false, общий keep-alive пул)
   src/lib/probe.ts          пробы: HEAD → GET Range fallback, ретраи
   src/lib/url-parser.ts     парсинг URL подключения
   src/lib/scanner.ts        сканер: seq/delta, руки, прыжки, sparse, gapfill, sweep
@@ -21,6 +21,9 @@ server/                     Express-сервер (TypeScript, CommonJS)
   src/lib/downloader.ts     очередь скачивания: пул потоков, докачка .part, нейминг _N
   src/lib/routes.ts         REST /api/sessions/* + SSE (sessions/scan/found/queue)
   src/lib/store.ts          state.json v2 (сессии, атомарная запись, автосейв)
+  src/lib/found-log.ts      append-only лог находок found-<id>.jsonl (вне state.json)
+  src/lib/pool.ts           глобальный семафор проб + общие HTTP-агенты (keep-alive, лимит сокетов)
+  src/lib/log.ts            логгер сервера (logError/logWarn/logInfo)
   test/*.spec.ts            юнит-тесты (node:test, сеть замокана)
 client/                     Angular 20 (standalone, signals, SCSS, тёмная тема)
   src/app/core/services/    Api, Sse, StateStore, Files, Toast
@@ -121,8 +124,8 @@ run.cmd
 - **Галерея**: пагинация, фильтр, сортировка, 4 размера превью (S/M/L/XL, редактируются).
   Клик по превью открывает оригинал; чекбокс выбирает файл, Shift+клик — диапазон.
 - **Очередь**: пул потоков 1..32 (авто-подстройка по скорости или ручной слайдер), докачка
-  `.part` (Range), дедуп «уже скачан» (тот же размер), суффиксы `_1.._N` при коллизиях,
-  пауза/резюм, повтор ошибок, очистка завершённых.
+  `.part` (Range), дедуп «уже скачан» (размер + фингерпринт краёв файла), суффиксы `_1.._N` при
+  коллизиях, пауза/резюм, повтор ошибок, очистка завершённых.
 - **Рестарт**: все сессии, их сканы и очереди продолжаются с места (state.json v2,
   автопродолжение wasRunning); старый одиночный state.json v1 мигрируется автоматически.
 - **Сброс состояния** (кнопка в панели скана): очищает списки скана/очереди активной

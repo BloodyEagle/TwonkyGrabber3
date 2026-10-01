@@ -117,8 +117,10 @@ export interface Arm {
 export interface ArmView {
     dir: ArmDir;
     pos: number;
+    step: number;
     phase: ArmPhase;
     state: ArmState;
+    foundCount: number;
 }
 
 // --- Сканер: прогресс ---

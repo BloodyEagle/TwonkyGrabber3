@@ -41,6 +41,16 @@ export interface SessionTab {
     autoAll: boolean;
 }
 
+/** Кэшируемое UI-состояние галереи сессии (восстанавливается при возврате на вкладку). */
+interface GalleryUiState {
+    page: number;
+    pageSize: number;
+    sort: SortDir;
+    typeFilter: TypeFilter;
+    thumbSize: ThumbSizeKey;
+    selection: ReadonlySet<number>;
+}
+
 /**
  * Центральное состояние на signals (план, §9): вкладки серверов, скан активной,
  * галерея, очередь, выбор. Данные активной сессии хранятся «плоско» — при
@@ -153,6 +163,10 @@ export class StateStore {
             }
             return next;
         });
+        // Чистим кэш UI удалённых (на стороне сервера) сессий.
+        for (const sid of [...this.uiCache.keys()]) {
+            if (!order.includes(sid)) this.uiCache.delete(sid);
+        }
         const active = this.activeSid();
         if (active !== null && !order.includes(active)) {
             this.selectSession(order[0] ?? null);
@@ -171,6 +185,7 @@ export class StateStore {
 
     /** Локальное удаление вкладки после DELETE /api/sessions/:id. */
     removeSession(id: string): void {
+        this.uiCache.delete(id);
         this.sessionTabs.update((prev) => {
             const next = new Map(prev);
             next.delete(id);
@@ -178,21 +193,58 @@ export class StateStore {
         });
         this.sessionOrder.update((o) => o.filter((sid) => sid !== id));
         if (this.activeSid() === id) {
-            this.selectSession(this.sessionOrder()[0] ?? null);
+            // Не сохраняем UI удалённой сессии — сразу переключаемся и восстанавливаем новую.
+            this.activeSid.set(this.sessionOrder()[0] ?? null);
+            this.refreshActiveFromTab();
+            this.loadUiState(this.activeSid());
+            this.resetActiveData();
         }
     }
 
-    /** Выбор вкладки (null — форма подключения). Данные активной сбрасываются;
-     *  владелец (App) перезагружает страницу галереи по смене activeSid. */
+    /** Выбор вкладки (null — форма подключения). UI-состояние активной сессии
+     *  сохраняется в кэш, состояние новой восстанавливается (per-session). */
     selectSession(sid: string | null): void {
+        const prev = this.activeSid();
+        if (prev !== null && prev !== sid) this.saveUiState(prev);
         this.activeSid.set(sid);
         this.refreshActiveFromTab();
-        // Данные активной сессии — под перезагрузку.
-        this.page.set(1);
+        this.loadUiState(sid);
+        this.resetActiveData();
+    }
+
+    /** Сохранить UI-состояние галереи сессии в кэш. */
+    private saveUiState(sid: string): void {
+        this.uiCache.set(sid, {
+            page: this.page(),
+            pageSize: this.pageSize(),
+            sort: this.sort(),
+            typeFilter: this.typeFilter(),
+            thumbSize: this.thumbSize(),
+            selection: this.selection(),
+        });
+    }
+
+    /** Восстановить UI-состояние галереи сессии (или дефолты для новой сессии). */
+    private loadUiState(sid: string | null): void {
+        const cached = sid === null ? undefined : this.uiCache.get(sid);
+        if (cached !== undefined) {
+            this.page.set(cached.page);
+            this.pageSize.set(cached.pageSize);
+            this.sort.set(cached.sort);
+            this.typeFilter.set(cached.typeFilter);
+            this.thumbSize.set(cached.thumbSize);
+            this.selection.set(new Set(cached.selection));
+        } else {
+            this.page.set(1);
+            this.clearSelection();
+        }
+    }
+
+    /** Данные активной сессии (не кэшируемые per-session) — под перезагрузку. */
+    private resetActiveData(): void {
         this.files.set([]);
         this.filesTotal.set(0);
         this.newFound.set(0);
-        this.clearSelection();
         this.queue.set(null);
         this.queueItems.set([]);
         this.queueTotal.set(0);
@@ -291,4 +343,7 @@ export class StateStore {
     }
 
     private lastAnchor: number | null = null;
+
+    /** Кэш UI-состояния галереи по сессиям (per-session). */
+    private readonly uiCache = new Map<string, GalleryUiState>();
 }

@@ -67,6 +67,14 @@ export const SAVE_RETRY_DELAY_MS = 300;
 
 /** Максимум одновременно исследуемых серверов (сессий). Не редактируется в рантайме. */
 export const MAX_SESSIONS = 16;
+/** Общий потолок одновременных upstream-проб по всем сессиям (защита от исчерпания сокетов). */
+export const GLOBAL_PROBE_CONCURRENCY = 64;
+/** Максимум одновременных сокетов на хост в общем пуле соединений (keep-alive). */
+export const HTTP_MAX_SOCKETS = 64;
+/** Максимум свободных keep-alive сокетов, удерживаемых пулом. */
+export const HTTP_MAX_FREE_SOCKETS = 16;
+/** Байт с каждого края файла для фингерпринта дедупа (plan §15, №7). */
+export const FINGERPRINT_BYTES = 4096;
 export const SSE_SCAN_MS = 500;
 export const SSE_FOUND_FLUSH_MS = 500;
 export const SSE_QUEUE_MS = 1000;

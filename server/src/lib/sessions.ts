@@ -48,6 +48,7 @@ export class SessionManager {
     private readonly sessions = new Map<string, Session>();
     private readonly foundSinks: Array<(session: Session, files: FoundFile[]) => void> = [];
     private readonly changeSinks: Array<() => void> = [];
+    private readonly removeSinks: Array<(id: string) => void> = [];
     private nextId = 1;
 
     constructor(private readonly downloadRoot: string = DOWNLOAD_DIR) {}
@@ -87,6 +88,11 @@ export class SessionManager {
 
     addOnChange(sink: () => void): void {
         this.changeSinks.push(sink);
+    }
+
+    /** Подписка на удаление сессии (для очистки внешних данных, напр. found-<id>.jsonl). */
+    addOnRemove(sink: (id: string) => void): void {
+        this.removeSinks.push(sink);
     }
 
     /**
@@ -154,6 +160,7 @@ export class SessionManager {
         session.downloader.dispose();
         this.sessions.delete(id);
         this.emitChange();
+        for (const sink of this.removeSinks) sink(id);
         return true;
     }
 

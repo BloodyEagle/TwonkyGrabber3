@@ -6,6 +6,7 @@
  */
 import { nodeTransport } from './http';
 import { C } from '../config';
+import { logWarn } from './log';
 import type { TwonkyConnection } from './types';
 
 /** Точные счётчики медиафайлов на сервере. */
@@ -31,11 +32,19 @@ export function parseInfoStatus(text: string): ServerStats | null {
         if (!Number.isFinite(value)) continue;
         map.set(key, value);
     }
-    const pictures = map.get('pictures');
-    const videos = map.get('videos');
+    const pictures = firstNonNegative(map, 'pictures', 'image_items', 'images', 'image_count', 'photos');
+    const videos = firstNonNegative(map, 'videos', 'video_items', 'video_count');
     if (pictures === undefined || videos === undefined) return null;
-    if (pictures < 0 || videos < 0) return null;
     return { pictures, videos };
+}
+
+/** Первый неотрицательный счётчик из списка ключей-алиасов (прошивки различаются). */
+function firstNonNegative(map: Map<string, number>, ...keys: string[]): number | undefined {
+    for (const key of keys) {
+        const value = map.get(key);
+        if (value !== undefined && value >= 0) return value;
+    }
+    return undefined;
 }
 
 /**
@@ -64,7 +73,8 @@ export async function fetchServerStats(connection: TwonkyConnection): Promise<Se
             res.stream.on('error', (err: unknown) => reject(err instanceof Error ? err : new Error(String(err))));
             res.stream.resume();
         });
-    } catch {
+    } catch (err: unknown) {
+        logWarn('stats', `статистика недоступна (${connection.host}:${connection.port}): ${err instanceof Error ? err.message : String(err)}`);
         return null;
     }
     return parseInfoStatus(text);

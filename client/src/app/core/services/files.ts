@@ -8,6 +8,8 @@ import { StateStore } from './state-store';
 export class FilesService {
     private readonly api = inject(ApiService);
     private readonly store = inject(StateStore);
+    /** Порядковый номер запроса — игнорируем устаревшие ответы и сброс индикатора. */
+    private loadSeq = 0;
 
     constructor() {
         // Смена вкладки → перезагрузка страницы галереи новой активной сессии.
@@ -15,7 +17,8 @@ export class FilesService {
         // становиться зависимостями эффекта (иначе смена фильтра прыгала бы на стр. 1).
         effect(() => {
             const sid = this.store.activeSid();
-            if (sid !== null) untracked(() => void this.loadPage(1));
+            // Восстанавливаем страницу вкладки (per-session кэш), а не сбрасываем на 1.
+            if (sid !== null) untracked(() => void this.loadPage());
         });
     }
 
@@ -23,18 +26,19 @@ export class FilesService {
     async loadPage(page?: number): Promise<void> {
         const sid = this.store.activeSid();
         if (sid === null) return;
+        const seq = ++this.loadSeq;
         const target = page ?? this.store.page();
         this.store.filesLoading.set(true);
         try {
             const r = await this.api.files(sid, target, this.store.pageSize(), this.store.sort(), this.store.typeFilter());
-            // Вкладка могла смениться за время запроса — не затираем новую.
-            if (this.store.activeSid() !== sid) return;
+            // Вкладка могла смениться (или пришёл новый запрос) — не затираем новое.
+            if (seq !== this.loadSeq || this.store.activeSid() !== sid) return;
             this.store.page.set(r.page);
             this.store.setFiles(r.items, r.total, true);
         } catch {
             /* сетевая ошибка — текущая страница остаётся как есть (SSE подхватит) */
         } finally {
-            this.store.filesLoading.set(false);
+            if (seq === this.loadSeq) this.store.filesLoading.set(false);
         }
     }
 
