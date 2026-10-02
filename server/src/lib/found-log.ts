@@ -15,6 +15,8 @@ import type { FoundFile } from './types';
 
 export class FoundLog {
     private readonly buffers = new Map<string, FoundFile[]>();
+    /** Цепочка сбросов: конкурентные appendFile могут перемешать строки. */
+    private chain: Promise<void> = Promise.resolve();
 
     constructor(private readonly dir: string) {}
 
@@ -29,8 +31,15 @@ export class FoundLog {
         this.buffers.set(sessionId, buffer);
     }
 
-    /** Сбросить буфер одной сессии или всех. */
-    async flush(sessionId?: string): Promise<void> {
+    /** Сбросить буфер одной сессии или всех; вызовы сериализуются. */
+    flush(sessionId?: string): Promise<void> {
+        const done = this.chain.then(() => this.flushAll(sessionId));
+        // Ошибка одного сброса не должна рвать цепочку последующих.
+        this.chain = done.catch(() => undefined);
+        return done;
+    }
+
+    private async flushAll(sessionId?: string): Promise<void> {
         if (sessionId !== undefined) {
             await this.flushOne(sessionId);
             return;
@@ -79,8 +88,14 @@ export class FoundLog {
         return out;
     }
 
-    /** Удалить лог сессии (при закрытии вкладки). */
-    async remove(sessionId: string): Promise<void> {
+    /** Удалить лог сессии (при закрытии вкладки); выполняется после текущего сброса. */
+    remove(sessionId: string): Promise<void> {
+        const done = this.chain.then(() => this.removeNow(sessionId));
+        this.chain = done.catch(() => undefined);
+        return done;
+    }
+
+    private async removeNow(sessionId: string): Promise<void> {
         this.buffers.delete(sessionId);
         try {
             await rm(this.file(sessionId), { force: true });

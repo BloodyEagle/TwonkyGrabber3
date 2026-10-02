@@ -9,6 +9,7 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { STATE_FILE, C, SAVE_RETRY_DELAY_MS } from '../config';
 import type { RuntimeConfig } from '../config';
+import { logError, logInfo, logWarn } from './log';
 import { sanitizeDirName, sessionDir } from './sessions';
 import type { PersistedScanState } from './scanner';
 import type { PersistedQueueState } from './downloader';
@@ -81,7 +82,7 @@ function migrateV1(v: Record<string, unknown>): PersistedState {
     }
     // Здесь queue !== null (иначе ранний выход выше) — TS не сужает из-за && .
     const dir = scan !== null ? sessionDir(scan.connection) : queueDirFallback(queue as PersistedQueueState);
-    console.log(`[store] state.json v1 → v2: сессия «1», каталог ${dir}`);
+    logInfo('store', `state.json v1 → v2: сессия «1», каталог ${dir}`);
     return { version: 2, nextSessionId: 2, sessions: [{ id: '1', dir, scan, queue }], config };
 }
 
@@ -91,6 +92,10 @@ function migrateV1(v: Record<string, unknown>): PersistedState {
  */
 export class Store {
     private timer: NodeJS.Timeout | null = null;
+    /** Цепочка записей: в один момент пишет только один вызов saveNow. */
+    private chain: Promise<void> = Promise.resolve();
+    /** Сколько записей в полёте (автосейв пропускает тик, чтобы не копить очередь). */
+    private inFlight = 0;
 
     constructor(private readonly filePath: string = STATE_FILE) {}
 
@@ -110,7 +115,7 @@ export class Store {
                 return migrateV1(v);
             }
             if (v.version !== 2) {
-                console.warn('[store] неизвестная версия state.json — состояние игнорируется');
+                logWarn('store', 'неизвестная версия state.json — состояние игнорируется');
                 return null;
             }
             const rawSessions = Array.isArray(v.sessions) ? v.sessions : [];
@@ -133,8 +138,9 @@ export class Store {
                 config: isPersistedConfig(v.config) ? v.config : null,
             };
         } catch (err: unknown) {
-            console.warn(
-                `[store] state.json повреждён (${err instanceof Error ? err.message : String(err)}) — стартуем с нуля`,
+            logWarn(
+                'store',
+                `state.json повреждён (${err instanceof Error ? err.message : String(err)}) — стартуем с нуля`,
             );
             return null;
         }
@@ -144,16 +150,36 @@ export class Store {
     startAutoSave(getState: () => PersistedState): void {
         this.stop();
         this.timer = setInterval(() => {
+            // Предыдущая запись ещё идёт — пропускаем тик: следующий снимок будет свежее.
+            if (this.inFlight > 0) return;
             void this.saveNow(getState());
         }, C.SAVE_EVERY_MS);
     }
 
-    /** Немедленная атомарная запись состояния (с ретраями под Windows). */
-    async saveNow(state: PersistedState): Promise<void> {
+    /**
+     * Запись снимка состояния. Вызовы сериализуются: одновременные saveNow
+     * (тик автосейва + shutdown) не накладываются на один `.tmp` и не ломают rename.
+     * Промис разрешается, когда именно этот снимок записан (важно для shutdown).
+     */
+    saveNow(state: PersistedState): Promise<void> {
+        this.inFlight += 1;
+        const done = this.chain
+            .then(() => this.writeState(state))
+            .finally(() => {
+                this.inFlight -= 1;
+            });
+        // Ошибка одной записи не должна рвать цепочку последующих.
+        this.chain = done.catch(() => undefined);
+        return done;
+    }
+
+    /** Одна атомарная запись (tmp + rename) с ретраями под Windows. */
+    private async writeState(state: PersistedState): Promise<void> {
         const data = `${JSON.stringify(state)}\n`;
         try {
             await mkdir(dirname(this.filePath), { recursive: true });
-        } catch {
+        } catch (err: unknown) {
+            logError('store', `каталог состояния недоступен (${dirname(this.filePath)})`, err);
             return; // каталог не создать — писать некуда
         }
         // Windows: rename в существующий файл даёт EPERM при кратковременной блокировке
@@ -166,9 +192,7 @@ export class Store {
                 return;
             } catch (err: unknown) {
                 if (attempt === 2) {
-                    console.error(
-                        `[store] не удалось записать состояние: ${err instanceof Error ? err.message : String(err)}`,
-                    );
+                    logError('store', 'не удалось записать состояние (tmp + rename)', err);
                 } else {
                     await sleep(SAVE_RETRY_DELAY_MS);
                 }
@@ -177,8 +201,8 @@ export class Store {
         // Фолбэк: прямая запись поверх (менее атомарно, но надёжнее при EPERM на rename).
         try {
             await writeFile(this.filePath, data, 'utf8');
-        } catch {
-            /* состояние просто не сохранится в этот тик */
+        } catch (err: unknown) {
+            logError('store', 'фолбэк-запись состояния не удалась', err);
         }
     }
 
