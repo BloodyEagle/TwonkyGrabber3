@@ -30,6 +30,8 @@ export interface PersistedScanState {
     arms: Arm[];
     /** Находки (опционально: в state.json не пишутся — хранятся в found-<id>.jsonl). */
     found?: FoundFile[];
+    /** Прогресс полного прохода (смещение сетки от якоря); null — проход не начат. */
+    sweepOffset?: number | null;
 }
 
 /** Позиция, запланированная на пробу в батче. */
@@ -85,6 +87,22 @@ export class Scanner {
     private readonly foundSinks: Array<(files: FoundFile[]) => void> = [];
     private probeTimestamps: number[] = [];
 
+    // --- полный проход (догоняющая фаза при неполной статистике) ---
+    /** Проход запущен (защита от повторного запуска из нескольких runArm-выходов). */
+    private sweepRunning = false;
+    /** Смещение сетки от якоря; персистентится — проход продолжается после рестарта. */
+    private sweepOffset: number | null = null;
+    /** Пробы, потраченные полным проходом (бюджет C.SWEEP_MAX_PROBES). */
+    private sweepProbesUsed = 0;
+    /** Диапазон номеров или бюджет исчерпаны — повторный проход бессмыслен. */
+    private sweepExhausted = false;
+    /** Номера с сетевыми сбоями за проход — повторяются в конце прохода. */
+    private sweepNeterrRetry: number[] = [];
+    /** Повторное получение статистики сервера (внедряется менеджером сессий). */
+    private statsFetcher: (() => Promise<ServerStats | null>) | null = null;
+    /** Повторный запрос статистики уже выполнялся — второй раз не делаем. */
+    private statsFetchDone = false;
+
     constructor(private readonly prober: Prober) {}
 
     /** Приёмник находок: SSE-хаб (батчи для фронта) и загрузчик (autoAll). */
@@ -101,6 +119,11 @@ export class Scanner {
     setServerTotals(stats: ServerStats | null): void {
         this.serverTotals = stats;
         this.checkStatsDone();
+    }
+
+    /** Внедрить повторное получение статистики (если /rpc/info_status не ответил при подключении). */
+    setStatsFetcher(fetcher: () => Promise<ServerStats | null>): void {
+        this.statsFetcher = fetcher;
     }
 
     private serverTotals: ServerStats | null = null;
@@ -209,6 +232,10 @@ export class Scanner {
         if (this.arms.length > 0) {
             this.status = 'scanning';
             this.startArmLoops();
+            // Все руки могли остановиться до паузы (restore после перезапуска сервера):
+            // без этого вызова скан навсегда остаётся в статусе scanning. Если полный
+            // проход уже идёт (он сам ждёт в waitGate) — не вмешиваемся.
+            if (this.arms.every((a) => a.state === 'stopped') && !this.sweepRunning) this.checkDone();
         } else if (this.lastDetectStart !== null) {
             // Пауза во время разведки после находки поиска — продолжаем от неё,
             // найденные файлы станут якорями (foundMap учитывается в detect).
@@ -258,6 +285,12 @@ export class Scanner {
         this.neterrStreak = 0;
         this.probeTimestamps = [];
         this.armLoopsRunning = false;
+        this.sweepRunning = false;
+        this.sweepOffset = null;
+        this.sweepProbesUsed = 0;
+        this.sweepExhausted = false;
+        this.sweepNeterrRetry = [];
+        this.statsFetchDone = false;
     }
 
     /** Эпоха библиотеки: инкремент при сбросе — фронт вешает её на URL превью,
@@ -277,6 +310,7 @@ export class Scanner {
             mode: this.mode,
             probed: this.probed,
             arms: this.arms.map((a) => ({ ...a, sweepQueue: [...a.sweepQueue] })),
+            sweepOffset: this.sweepOffset,
             found: this.foundList(),
         };
     }
@@ -290,6 +324,7 @@ export class Scanner {
             mode: this.mode,
             probed: this.probed,
             arms: this.arms.map((a) => ({ ...a, sweepQueue: [...a.sweepQueue] })),
+            sweepOffset: this.sweepOffset,
         };
     }
 
@@ -303,6 +338,7 @@ export class Scanner {
         this.mode = state.mode;
         this.probed = state.probed;
         this.arms = state.arms.map((a) => ({ ...a, sweepQueue: [...a.sweepQueue] }));
+        this.sweepOffset = state.sweepOffset ?? null;
         for (const f of state.found ?? []) {
             this.foundMap.set(f.number, f);
             if (f.kind === 'image') this.foundImagesCount += 1;
@@ -362,6 +398,13 @@ export class Scanner {
         this.arms = [];
         this.visited.clear();
         this.probeTimestamps = [];
+        // Новый скан — новый бюджет полного прохода; sweepOffset сохраняется,
+        // чтобы продолжить обход диапазона с прошлого места.
+        this.sweepRunning = false;
+        this.sweepProbesUsed = 0;
+        this.sweepExhausted = false;
+        this.sweepNeterrRetry = [];
+        this.statsFetchDone = false;
         const conn = this.connection;
         if (conn === null) return;
         // Запоминаем точку старта разведки — resume() продолжит с неё, а не перезапустит заново.
@@ -375,6 +418,7 @@ export class Scanner {
     /** Разведка блока start..start+C.DETECT_BLOCK-1 (startN — точка старта). */
     private async detect(gen: number, conn: TwonkyConnection, startN: number = conn.startNumber): Promise<void> {
         const foundNumbers: number[] = [];
+        const neterrNumbers: number[] = [];
         let anyResponse = false;
 
         for (let base = 0; base < C.DETECT_BLOCK; base += C.PROBE_BATCH) {
@@ -401,6 +445,11 @@ export class Scanner {
                 this.probeTimestamps.push(Date.now());
                 if (res.kind === 'neterr') {
                     this.neterrStreak += 1;
+                    // Номер остаётся непроверенным: снимаем отметку visited, чтобы
+                    // разведка (после resume) повторила пробу — иначе разовый сбой
+                    // сети теряет файл, а пауза разведки после resume зацикливается.
+                    this.visited.delete(n);
+                    neterrNumbers.push(n);
                     if (this.neterrStreak >= C.NETERR_PAUSE) {
                         this.pauseNeterr();
                         return;
@@ -429,6 +478,9 @@ export class Scanner {
 
         this.mode = foundNumbers.length >= C.SEQ_THRESHOLD ? 'seq' : 'delta';
         this.arms = this.buildArms(this.mode, startN, foundNumbers);
+        // Сбойные пробы разведки — в очередь плотного прохода первой руки (повтор).
+        const firstArm = this.arms[0];
+        if (firstArm !== undefined) firstArm.sweepQueue.push(...neterrNumbers);
         this.status = 'scanning';
         this.armLoopsRunning = true;
         for (const arm of this.arms) {
@@ -632,6 +684,10 @@ export class Scanner {
             if (res.kind === 'neterr') {
                 this.neterrStreak += 1;
                 neterrNow = true;
+                // Снимаем отметку и возвращаем номер в очередь плотного прохода:
+                // разовый сбой сети не должен терять файл.
+                this.visited.delete(it.number);
+                arm.sweepQueue.push(it.number);
                 continue;
             }
             this.neterrStreak = 0;
@@ -680,6 +736,7 @@ export class Scanner {
         for (const w of waiters) w();
         for (const a of this.arms) a.state = 'stopped';
         this.arms = [];
+        this.sweepRunning = false;
         this.mode = null;
         this.status = 'detecting';
         this.neterrStreak = 0;
@@ -757,11 +814,13 @@ export class Scanner {
         sink.push(file);
     }
 
-    /** Все руки остановлены → скан завершён. Если статистика известна и библиотека
-     *  не полна — фиксируем причину досрочной остановки (а не молчаливый done). */
+    /** Все руки остановлены → полный проход (если статистика неполна) либо завершение.
+     *  Если статистика известна и библиотека не полна даже после прохода — фиксируем
+     *  причину досрочной остановки (а не молчаливый done). */
     private checkDone(): void {
         if (this.status !== 'scanning') return;
         if (this.arms.length === 0 || !this.arms.every((a) => a.state === 'stopped')) return;
+        if (this.tryStartSweep()) return;
         this.status = 'done';
         if (this.serverTotals === null) {
             this.reason = null;
@@ -772,10 +831,203 @@ export class Scanner {
         if (total > 0 && images + videos < total) {
             this.reason =
                 `Остановлено досрочно: найдено ${images + videos} из ${total} ` +
-                `(фото ${images} из ${this.serverTotals.pictures}, видео ${videos} из ${this.serverTotals.videos})`;
+                `(фото ${images} из ${this.serverTotals.pictures}, видео ${videos} из ${this.serverTotals.videos})` +
+                this.sweepNote();
             logWarn('scan', this.reason);
             return;
         }
         this.reason = null;
+    }
+
+    /** Пометка в reason, почему полный проход не смог продолжиться. */
+    private sweepNote(): string {
+        if (this.sweepProbesUsed >= C.SWEEP_MAX_PROBES) return ' — исчерпан бюджет полного прохода';
+        if (this.sweepExhausted) return ' — полный проход по диапазону номеров остальных не нашёл';
+        return '';
+    }
+
+    // --- полный проход (догоняющая фаза) ---
+
+    /**
+     * Решает, нужен ли полный проход, и запускает его. true — завершение отложено
+     * (проход уже идёт/запущен или запрошена повторная статистика).
+     */
+    private tryStartSweep(): boolean {
+        if (this.sweepExhausted || this.sweepRunning) return false;
+        if (this.sweepProbesUsed >= C.SWEEP_MAX_PROBES) return false;
+        if (this.serverTotals === null) {
+            // Статистики нет (например, /rpc/info_status не ответил при подключении):
+            // один повторный запрос — если снова недоступна, завершаем как раньше.
+            if (this.statsFetcher === null || this.statsFetchDone) return false;
+            void this.refreshStatsAndDecide();
+            return true;
+        }
+        const total = this.serverTotals.pictures + this.serverTotals.videos;
+        if (total <= 0 || this.mediaFoundCount() >= total) return false;
+        this.sweepRunning = true;
+        this.reason =
+            `Найдено ${this.mediaFoundCount()} из ${total} — полный проход по номерам (шаг ${C.SWEEP_STRIDE})`;
+        const gen = this.generation;
+        void this.runSweep(gen).catch((err: unknown) => {
+            if (gen !== this.generation) return;
+            this.sweepRunning = false;
+            this.status = 'error';
+            this.reason = `Ошибка полного прохода: ${err instanceof Error ? err.message : String(err)}`;
+        });
+        return true;
+    }
+
+    /** Повторная статистика после остановки рук; по результату — проход или завершение. */
+    private async refreshStatsAndDecide(): Promise<void> {
+        const fetcher = this.statsFetcher;
+        if (fetcher === null) return;
+        this.statsFetchDone = true;
+        let stats: ServerStats | null = null;
+        try {
+            stats = await fetcher();
+        } catch {
+            stats = null;
+        }
+        if (this.status !== 'scanning') return; // остановлено/сброшено за время запроса
+        if (stats !== null) this.serverTotals = stats;
+        this.checkStatsDone();
+        if (this.status === 'scanning') this.checkDone();
+    }
+
+    /** Якорь сетки прохода: минимальный найденный номер, иначе стартовый. */
+    private sweepAnchor(): number {
+        let min = Infinity;
+        for (const n of this.foundMap.keys()) {
+            if (n < min) min = n;
+        }
+        if (min !== Infinity) return min;
+        const conn = this.connection;
+        return conn === null ? 0 : conn.startNumber;
+    }
+
+    /**
+     * Полный проход: кандидаты — сетка «якорь ± offset» с шагом C.SWEEP_STRIDE в обе
+     * стороны, посещённые номера пропускаются. Находка перезапускает разведку вокруг
+     * неё (relaunchDetect) — дальше работают обычные руки. Сетка выровнена по
+     * реальному файлу, поэтому delta-библиотеки покрываются полностью; плотные
+     * seq-области находятся первой же пробой в их пределах.
+     */
+    private async runSweep(gen: number): Promise<void> {
+        const conn = this.connection;
+        if (conn === null) {
+            this.sweepRunning = false;
+            return;
+        }
+        const stride = Math.max(1, C.SWEEP_STRIDE);
+        const anchor = this.sweepAnchor();
+        if (this.sweepOffset === null) this.sweepOffset = 0;
+        try {
+            while (this.sweepProbesUsed < C.SWEEP_MAX_PROBES) {
+                if (!(await this.waitGate(gen))) return;
+                if (gen !== this.generation) return;
+
+                // Очередные позиции сетки вверх и вниз от якоря.
+                const items: number[] = [];
+                let offset = this.sweepOffset;
+                let exhausted = false;
+                while (items.length < C.PROBE_BATCH && this.sweepProbesUsed + items.length < C.SWEEP_MAX_PROBES) {
+                    offset += stride;
+                    const up = anchor + offset;
+                    const down = anchor - offset;
+                    if (up > C.MAX_NUMBER && down < 0) {
+                        exhausted = true;
+                        break;
+                    }
+                    if (up <= C.MAX_NUMBER && !this.visited.has(up)) items.push(up);
+                    if (down >= 0 && !this.visited.has(down)) items.push(down);
+                }
+                if (exhausted) {
+                    // Последний шанс для номеров с сетевыми сбоями в этом проходе.
+                    const retried = await this.retrySweepNeterr(gen, conn);
+                    if (retried !== null) {
+                        if (typeof retried === 'number') this.relaunchDetect(retried);
+                        return;
+                    }
+                    this.sweepExhausted = true;
+                    return;
+                }
+                this.sweepOffset = offset;
+
+                const results = await Promise.all(items.map((n) => probePool.run(() => this.prober.probe(n))));
+                this.probed += items.length;
+                this.sweepProbesUsed += items.length;
+
+                const newFound: FoundFile[] = [];
+                let relaunchAt: number | null = null;
+                for (const [i, n] of items.entries()) {
+                    const res = results[i];
+                    if (res === undefined) continue;
+                    this.probeTimestamps.push(Date.now());
+                    if (res.kind === 'neterr') {
+                        this.neterrStreak += 1;
+                        this.sweepNeterrRetry.push(n);
+                        continue; // номер остаётся непосещённым — проход повторит его
+                    }
+                    this.neterrStreak = 0;
+                    this.visited.add(n);
+                    if (res.kind === 'exists' && res.media !== null) {
+                        this.registerFound(n, res, conn, newFound);
+                        if (relaunchAt === null || n < relaunchAt) relaunchAt = n;
+                    }
+                }
+                if (newFound.length > 0) this.emitFound(newFound);
+                if (this.neterrStreak >= C.NETERR_PAUSE) {
+                    this.pauseNeterr();
+                    return; // после resume: resume() → checkDone() → проход продолжится
+                }
+                if (relaunchAt !== null) {
+                    this.relaunchDetect(relaunchAt);
+                    return;
+                }
+            }
+        } finally {
+            if (gen === this.generation) {
+                this.sweepRunning = false;
+                // Бюджет исчерпан — фиксируем итог; статус paused (пауза по neterr)
+                // не трогаем: после resume resume() вызовет checkDone сам.
+                if (this.status === 'scanning') this.checkDone();
+            }
+        }
+    }
+
+    /** Повтор проб с сетевыми сбоями в конце прохода. Число — минимальная находка
+     *  (нужен relaunchDetect); null — повторять нечего; 'paused' — пауза по серии сбоев. */
+    private async retrySweepNeterr(gen: number, conn: TwonkyConnection): Promise<number | 'paused' | null> {
+        let minFound: number | null = null;
+        while (this.sweepNeterrRetry.length > 0 && this.sweepProbesUsed < C.SWEEP_MAX_PROBES) {
+            if (!(await this.waitGate(gen))) return null;
+            if (gen !== this.generation) return null;
+            const batch = this.sweepNeterrRetry.splice(0, C.PROBE_BATCH);
+            const results = await Promise.all(batch.map((n) => probePool.run(() => this.prober.probe(n))));
+            this.probed += batch.length;
+            this.sweepProbesUsed += batch.length;
+            const newFound: FoundFile[] = [];
+            for (const [i, n] of batch.entries()) {
+                const res = results[i];
+                if (res === undefined) continue;
+                this.probeTimestamps.push(Date.now());
+                if (res.kind === 'neterr') {
+                    this.neterrStreak += 1;
+                    if (this.neterrStreak >= C.NETERR_PAUSE) {
+                        this.pauseNeterr();
+                        return 'paused';
+                    }
+                    continue; // остаётся непосещённым
+                }
+                this.neterrStreak = 0;
+                this.visited.add(n);
+                if (res.kind === 'exists' && res.media !== null) {
+                    this.registerFound(n, res, conn, newFound);
+                    if (minFound === null || n < minFound) minFound = n;
+                }
+            }
+            if (newFound.length > 0) this.emitFound(newFound);
+        }
+        return minFound;
     }
 }

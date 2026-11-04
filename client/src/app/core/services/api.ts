@@ -130,6 +130,8 @@ export interface RuntimeConfig {
     SPARSE_PROBES: number;
     SPARSE_MIN: number;
     SPARSE_MAX: number;
+    SWEEP_STRIDE: number;
+    SWEEP_MAX_PROBES: number;
     DENSE_SWEEP_EVERY: number;
     MAX_NUMBER: number;
     EPS_WINDOW_MS: number;
@@ -153,6 +155,8 @@ export interface RuntimeConfig {
     THUMB_MIN: number;
     THUMB_MAX: number;
     THUMB_CACHE_MAX_AGE: number;
+    THUMB_CACHE_MAX_BYTES: number;
+    THUMB_NEG_CACHE_TTL: number;
     SAVE_EVERY_MS: number;
     SSE_SCAN_MS: number;
     SSE_FOUND_FLUSH_MS: number;

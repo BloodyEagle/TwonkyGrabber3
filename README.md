@@ -16,10 +16,12 @@ server/                     Express-сервер (TypeScript, CommonJS)
   src/lib/http.ts           транспорт на node:http/https (rejectUnauthorized: false, общий keep-alive пул)
   src/lib/probe.ts          пробы: HEAD → GET Range fallback, ретраи
   src/lib/url-parser.ts     парсинг URL подключения
-  src/lib/scanner.ts        сканер: seq/delta, руки, прыжки, sparse, gapfill, sweep
+  src/lib/scanner.ts        сканер: seq/delta, руки, прыжки, sparse, gapfill, sweep,
+                            полный проход по номерам при неполной статистике сервера
   src/lib/sessions.ts       менеджер сессий: несколько Twonky-серверов параллельно
   src/lib/downloader.ts     очередь скачивания: пул потоков, докачка .part, нейминг _N
   src/lib/routes.ts         REST /api/sessions/* + SSE (sessions/scan/found/queue)
+  src/lib/thumb-cache.ts    дисковый кэш превью (позитивный + негативный 404, LRU-обрезка)
   src/lib/store.ts          state.json v2 (сессии, атомарная запись, автосейв)
   src/lib/found-log.ts      append-only лог находок found-<id>.jsonl (вне state.json)
   src/lib/pool.ts           глобальный семафор проб + общие HTTP-агенты (keep-alive, лимит сокетов)

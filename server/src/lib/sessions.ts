@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import { DOWNLOAD_DIR, MAX_SESSIONS } from '../config';
 import { Downloader, createNodeDownloaderDeps } from './downloader';
 import { probeUrl } from './probe';
+import { fetchServerStats } from './server-stats';
 import { Scanner } from './scanner';
 import type { Prober } from './scanner';
 import { fileUrl } from './url-parser';
@@ -135,6 +136,12 @@ export class SessionManager {
         const scanner = new Scanner(prober);
         scannerRef = scanner;
         if (connection !== null) scanner.setConnection(connection);
+        // Повторная статистика при остановке рук без /rpc/info_status (бывает
+        // недоступен в момент подключения из-за сети).
+        scanner.setStatsFetcher(() => {
+            const conn = scannerRef?.getConnection() ?? null;
+            return conn === null ? Promise.resolve(null) : fetchServerStats(conn);
+        });
 
         const dir = opts.dir ?? sessionDir(connection);
         const downloader = new Downloader(createNodeDownloaderDeps(join(this.downloadRoot, dir)), scanner);

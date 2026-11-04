@@ -15,7 +15,7 @@
  */
 import { createHash } from 'node:crypto';
 import type { FileHandle } from 'node:fs/promises';
-import { C, FINGERPRINT_BYTES } from '../config';
+import { C, FINGERPRINT_BYTES, RENAME_RETRIES, RENAME_RETRY_DELAY_MS } from '../config';
 import { nodeTransport } from './http';
 import { logError } from './log';
 import type { HttpStreamOptions, HttpStreamResponse } from './http';
@@ -709,7 +709,19 @@ export function createNodeDownloaderDeps(downloadDir: string): DownloaderDeps {
             }
         },
         write: (path, append) => createWriteStream(path, { flags: append ? 'a' : 'w' }),
-        rename: (from, to) => fsPromises.rename(from, to),
+        rename: async (from, to) => {
+            // Windows: кратковременная блокировка нового файла (антивирус/индексатор)
+            // даёт EPERM на rename — несколько попыток с паузой.
+            for (let attempt = 1; ; attempt += 1) {
+                try {
+                    await fsPromises.rename(from, to);
+                    return;
+                } catch (err: unknown) {
+                    if (attempt >= RENAME_RETRIES) throw err;
+                    await sleep(RENAME_RETRY_DELAY_MS);
+                }
+            }
+        },
         mkdirp: async (path) => {
             await fsPromises.mkdir(path, { recursive: true });
         },
