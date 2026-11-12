@@ -139,6 +139,57 @@ test('prune: просроченные записи удаляются по TTL',
 });
 
 test('key: компоненты ключа склеиваются безопасно для ФС', () => {
-    assert.equal(ThumbCache.key('94.172.130.32_9000', 3, 131100, '200x160'), '94.172.130.32_9000_3_131100_200x160');
-    assert.equal(ThumbCache.key('srv', 0, 5, 'orig'), 'srv_0_5_orig');
+    assert.equal(
+        ThumbCache.key('94.172.130.32_9000', 3, 131100, '200x160'),
+        '18:94.172.130.32_9000_3_131100_200x160',
+    );
+    assert.equal(ThumbCache.key('srv', 0, 5, 'orig'), '3:srv_0_5_orig');
+});
+
+test('key: длина в префиксе сессии исключает коллизии «host_80» vs «host_8080»', () => {
+    const pa = ThumbCache.sessionPrefix('1.2.3.4_80');
+    const pb = ThumbCache.sessionPrefix('1.2.3.4_8080');
+    assert.ok(!pb.startsWith(pa) && !pa.startsWith(pb), 'префикс одной сессии не должен совпадать с префиксом другой');
+});
+
+test('prune: осиротевшие записи (тело без меты, мета без тела) удаляются', async () => {
+    const dir = await tempDir();
+    try {
+        const cache = new ThumbCache(dir);
+        // Тело без меты: сбой записи до мета-файла (новый порядок: .bin первым).
+        await writeFile(join(dir, 'orphan-bin.bin'), Buffer.from('body'));
+        // Мета без тела: сбой записи старого формата или потеря .bin.
+        await cache.put('orphan-meta', IMG);
+        await rm(join(dir, 'orphan-meta.bin'));
+        await cache.prune();
+
+        const names = await readdir(dir);
+        assert.equal(names.some((f) => f === 'orphan-bin.bin'), false, 'тело без меты удаляется');
+        assert.equal(names.some((f) => f === 'orphan-meta.json'), false, 'мета без тела удаляется');
+        // И get() сам подчищает мета-без-тела без ожидания prune.
+        await cache.put('orphan-meta2', IMG);
+        await rm(join(dir, 'orphan-meta2.bin'));
+        assert.equal(await cache.get('orphan-meta2'), null);
+        assert.equal((await readdir(dir)).some((f) => f === 'orphan-meta2.json'), false);
+    } finally {
+        await rm(dir, { recursive: true, force: true });
+    }
+});
+
+test('purgePrefix: записи сессии удаляются, соседняя сессия не задета', async () => {
+    const dir = await tempDir();
+    try {
+        const cache = new ThumbCache(dir);
+        const host80 = ThumbCache.key('1.2.3.4_80', 1, 5, 'orig');
+        const host8080 = ThumbCache.key('1.2.3.4_8080', 1, 5, 'orig');
+        await cache.put(host80, IMG);
+        await cache.put(host8080, IMG);
+
+        await cache.purgePrefix(ThumbCache.sessionPrefix('1.2.3.4_80'));
+
+        assert.equal(await cache.get(host80), null, 'запись закрытой сессии удалена');
+        assert.ok((await cache.get(host8080)) !== null, 'запись другой сессии не тронута');
+    } finally {
+        await rm(dir, { recursive: true, force: true });
+    }
 });

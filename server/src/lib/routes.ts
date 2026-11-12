@@ -302,33 +302,80 @@ export function createApiRouter(deps: ApiDeps): Router {
 
     // --- Превью ---
 
-    /** Прочитать тело апстрима целиком (таймаут простоя ограничивает зависания). */
-    const readAll = (stream: NodeJS.ReadableStream): Promise<Buffer> =>
-        new Promise<Buffer>((resolve, reject) => {
+    /**
+     * Прочитать тело апстрима с потолком размера (SPEC-8): тело больше cap не
+     * буферизуется — поток уничтожается, возвращается null. Таймаут простоя
+     * ограничивает зависания.
+     */
+    const readCapped = (
+        stream: NodeJS.ReadableStream & { destroy(err?: Error | undefined): void },
+        cap: number,
+    ): Promise<Buffer | null> =>
+        new Promise<Buffer | null>((resolve, reject) => {
             const chunks: Buffer[] = [];
-            stream.on('data', (chunk: Buffer) => chunks.push(chunk));
-            stream.on('end', () => resolve(Buffer.concat(chunks)));
-            stream.on('error', (err: unknown) =>
-                reject(err instanceof Error ? err : new Error(String(err))),
-            );
+            let total = 0;
+            let settled = false;
+            stream.on('data', (chunk: Buffer) => {
+                if (settled) return;
+                total += chunk.length;
+                if (total > cap) {
+                    settled = true;
+                    stream.destroy();
+                    resolve(null);
+                    return;
+                }
+                chunks.push(chunk);
+            });
+            stream.on('end', () => {
+                if (!settled) {
+                    settled = true;
+                    resolve(Buffer.concat(chunks));
+                }
+            });
+            stream.on('error', (err: unknown) => {
+                if (!settled) {
+                    settled = true;
+                    reject(err instanceof Error ? err : new Error(String(err)));
+                }
+            });
             stream.resume();
         });
 
     /**
-     * Загрузка картинки с апстрима для кэша: content (картинка) или negative
-     * (не 200 / не image — в том числе видео). Сетевая ошибка — исключение (502).
-     * Оригиналы больше THUMB_CACHE_FILE_MAX_BYTES отдаются, но в кэш не пишутся.
+     * Загрузка картинки с апстрима для кэша. Исходы:
+     *  - content — картинка, тело целиком (не больше THUMB_CACHE_FILE_MAX_BYTES);
+     *  - negative — «файла нет» (404/410 или не картинка) — кэшируется;
+     *  - unavail — прочие не-200 (5xx, 403…): временное состояние сервера, в
+     *    негативный кэш не попадает, чтобы разовый сбой не кэшировался как
+     *    «файла нет» (SPEC-2);
+     *  - toolarge — тело больше THUMB_CACHE_FILE_MAX_BYTES: отдаётся потоково,
+     *    без буферизации в памяти (SPEC-8).
+     * Сетевая ошибка — исключение (502); signal — отмена при обрыве клиента.
      */
-    const fetchImage = async (url: string): Promise<ThumbLoadResult> => {
-        const upstream = await nodeTransport.stream(url, { headers: {}, idleTimeoutMs: C.PROBE_TIMEOUT });
-        const contentType = String(upstream.headers['content-type'] ?? '');
-        if (upstream.status !== 200 || !contentType.startsWith('image/')) {
-            upstream.stream.destroy();
-            return { type: 'negative' };
-        }
+    const fetchImage = async (url: string, signal?: AbortSignal): Promise<ThumbLoadResult> => {
+        const upstream = await nodeTransport.stream(url, { headers: {}, idleTimeoutMs: C.PROBE_TIMEOUT, signal });
         try {
-            const body = await readAll(upstream.stream);
-            return { type: 'content', contentType, body, cache: body.length <= THUMB_CACHE_FILE_MAX_BYTES };
+            const contentType = String(upstream.headers['content-type'] ?? '');
+            if (upstream.status === 404 || upstream.status === 410) {
+                upstream.stream.destroy();
+                return { type: 'negative' };
+            }
+            if (upstream.status !== 200 || !contentType.startsWith('image/')) {
+                upstream.stream.destroy();
+                return { type: 'unavail', status: upstream.status };
+            }
+            // Потолок по Content-Length — ещё до скачивания; без заголовка потолок
+            // контролируется в ходе чтения (readCapped).
+            const clRaw = upstream.headers['content-length'];
+            const cl = Array.isArray(clRaw) ? clRaw[0] : clRaw;
+            const declared = cl !== undefined ? Number.parseInt(cl, 10) : Number.NaN;
+            if (Number.isFinite(declared) && declared > THUMB_CACHE_FILE_MAX_BYTES) {
+                upstream.stream.destroy();
+                return { type: 'toolarge' };
+            }
+            const body = await readCapped(upstream.stream, THUMB_CACHE_FILE_MAX_BYTES);
+            if (body === null) return { type: 'toolarge' };
+            return { type: 'content', contentType, body, cache: true };
         } catch (err: unknown) {
             upstream.stream.destroy();
             throw err;
@@ -340,11 +387,36 @@ export function createApiRouter(deps: ApiDeps): Router {
             res.status(404).end();
             return;
         }
+        if (result.type === 'unavail') {
+            res.status(502).json({ ok: false, reason: `Медиасервер ответил HTTP ${result.status}` });
+            return;
+        }
         res.status(200);
         res.set('Content-Type', result.contentType);
         res.set('Content-Length', String(result.body.length));
         res.set('Cache-Control', `public, max-age=${C.THUMB_CACHE_MAX_AGE}`);
         res.end(result.body);
+    };
+
+    /** Клиенты in-flight загрузок превью по ключу кэша: когда последний клиент
+     *  ключа отвалился, апстрим-загрузка прерывается (plan §7, SPEC-3). */
+    const thumbWaiters = new Map<string, Set<Response>>();
+    const trackThumbClient = (key: string, res: Response, onLastClose: () => void): void => {
+        let clients = thumbWaiters.get(key);
+        if (clients === undefined) {
+            clients = new Set();
+            thumbWaiters.set(key, clients);
+        }
+        clients.add(res);
+        res.on('close', () => {
+            const set = thumbWaiters.get(key);
+            if (set === undefined) return;
+            set.delete(res);
+            if (set.size === 0) {
+                thumbWaiters.delete(key);
+                onLastClose();
+            }
+        });
     };
 
     router.get('/sessions/:id/thumb', (req, res) => {
@@ -362,7 +434,9 @@ export function createApiRouter(deps: ApiDeps): Router {
         }
         const epoch = session.scanner.epoch();
 
+        let clientGone = false;
         const failNeterr = (err: unknown): void => {
+            if (clientGone) return; // клиент отвалился — ответ и лог не нужны
             logError('thumb', `сервер недоступен при запросе превью #${n}`, err);
             if (!res.headersSent) {
                 res.status(502).json({
@@ -372,14 +446,63 @@ export function createApiRouter(deps: ApiDeps): Router {
             }
         };
 
+        /** Потоковая отдача тела апстрима напрямую клиенту (oversize-оригиналы):
+         *  память не буферизуется (SPEC-8), обрыв клиента уничтожает апстрим (plan §7). */
+        const streamOriginal = (res: Response): void => {
+            nodeTransport
+                .stream(fileUrl(conn, n), { headers: {}, idleTimeoutMs: C.PROBE_TIMEOUT })
+                .then((upstream) => {
+                    const contentType = String(upstream.headers['content-type'] ?? '');
+                    if (upstream.status !== 200 || !contentType.startsWith('image/')) {
+                        upstream.stream.destroy();
+                        if (!res.headersSent) {
+                            if (upstream.status === 404 || upstream.status === 410) res.status(404).end();
+                            else res.status(502).json({ ok: false, reason: `Медиасервер ответил HTTP ${upstream.status}` });
+                        }
+                        return;
+                    }
+                    res.status(200);
+                    res.set('Content-Type', contentType);
+                    const clRaw = upstream.headers['content-length'];
+                    const cl = Array.isArray(clRaw) ? clRaw[0] : clRaw;
+                    if (cl !== undefined) res.set('Content-Length', cl);
+                    res.set('Cache-Control', `public, max-age=${C.THUMB_CACHE_MAX_AGE}`);
+                    upstream.stream.pipe(res);
+                    upstream.stream.on('error', () => {
+                        res.destroy();
+                    });
+                    // Обрыв клиента → destroy апстрима (plan §7).
+                    res.on('close', () => upstream.stream.destroy());
+                })
+                .catch((err: unknown) => failNeterr(err));
+        };
+
+        /** Общая доставка: трекинг клиентов ключа, кэш/загрузка, oversize — потоком. */
+        const deliver = (key: string, loader: (signal: AbortSignal) => Promise<ThumbLoadResult>): void => {
+            res.on('close', () => {
+                clientGone = true;
+            });
+            trackThumbClient(key, res, () => deps.thumbCache.cancelInflight(key));
+            void deps.thumbCache
+                .getOrLoad(key, loader)
+                .then((result) => {
+                    if (clientGone) return; // клиент отвалился, пока грузили
+                    if (result.type === 'toolarge') {
+                        // Oversize-тело в кэш не попадает — потоковый повтор запроса.
+                        streamOriginal(res);
+                        return;
+                    }
+                    sendThumbResult(res, result);
+                })
+                .catch(failNeterr);
+        };
+
         if (queryToString(req.query.orig) === '1') {
             // Принудительно оригинал (открытие полного изображения);
             // не-картинка (видео) → негативный кэш и заглушка на фронте.
-            const key = ThumbCache.key(session.dir, epoch, n, 'orig');
-            deps.thumbCache
-                .getOrLoad(key, () => fetchImage(fileUrl(conn, n)))
-                .then((result) => sendThumbResult(res, result))
-                .catch(failNeterr);
+            deliver(ThumbCache.key(session.dir, epoch, n, 'orig'), (signal) =>
+                fetchImage(fileUrl(conn, n), signal),
+            );
             return;
         }
 
@@ -391,18 +514,14 @@ export function createApiRouter(deps: ApiDeps): Router {
         }
         const clamp = (v: number): number => Math.min(C.THUMB_MAX, Math.max(C.THUMB_MIN, Math.round(v)));
         const size = `${clamp(w)}x${clamp(h)}`;
-        const key = ThumbCache.key(session.dir, epoch, n, size);
 
-        void deps.thumbCache
-            .getOrLoad(key, async () => {
-                // Масштабированное превью; если его нет — фолбэк на оригинал
-                // (только картинки; видео уйдёт в негативный кэш).
-                const scaled = await fetchImage(thumbUrl(conn, n, clamp(w), clamp(h)));
-                if (scaled.type === 'content') return scaled;
-                return fetchImage(fileUrl(conn, n));
-            })
-            .then((result) => sendThumbResult(res, result))
-            .catch(failNeterr);
+        deliver(ThumbCache.key(session.dir, epoch, n, size), async (signal) => {
+            // Масштабированное превью; если его нет/он недоступен/он oversize —
+            // фолбэк на оригинал (видео уйдёт в негативный кэш, oversize — в поток).
+            const scaled = await fetchImage(thumbUrl(conn, n, clamp(w), clamp(h)), signal);
+            if (scaled.type === 'content') return scaled;
+            return fetchImage(fileUrl(conn, n), signal);
+        });
     });
 
     // --- Очередь скачивания (план, п.8) ---

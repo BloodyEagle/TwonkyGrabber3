@@ -64,7 +64,7 @@ cd ../server && npm start        # раздаёт client/dist и API на одн
 ### Тесты
 
 ```bash
-cd server && npm test            # 51 тестов (node:test через tsx)
+cd server && npm test            # юнит-тесты (node:test через tsx)
 ```
 
 ### Docker
@@ -101,6 +101,7 @@ run.cmd
 | `DOWNLOAD_DIR` | `./downloads` | каталог скачиваемых файлов |
 | `STATE_FILE` | `./data/state.json` | файл персистентного состояния |
 | `STATIC_ROOT` | `../client/dist` | базовый каталог сборки фронта |
+| `THUMB_CACHE_DIR` | `./data/thumb-cache` | каталог дискового кэша превью |
 
 ## Настройки
 

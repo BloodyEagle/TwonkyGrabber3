@@ -80,9 +80,12 @@ app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
 const store = new Store();
 // Находки — append-only JSONL (state.json остаётся маленьким, без O(n) перезаписи).
 const foundLog = new FoundLog(dirname(STATE_FILE));
-// Находки дописываются по мере поступления; лог чистится при закрытии вкладки.
+// Находки дописываются по мере поступления; лог и превью-кэш чистятся при закрытии вкладки.
 manager.addOnFound((session, files) => foundLog.append(session.id, files));
-manager.addOnRemove((id) => void foundLog.remove(id));
+manager.addOnRemove((id, session) => {
+    void foundLog.remove(id);
+    void thumbCache.purgePrefix(ThumbCache.sessionPrefix(session.dir));
+});
 
 /** Снимок состояния для записи в state.json (версия 2 — все сессии, без списка находок). */
 const snapshot = (): PersistedState => ({

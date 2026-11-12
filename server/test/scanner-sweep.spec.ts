@@ -98,7 +98,7 @@ test('полный проход: исчерпание бюджета → done с
     assert.match(p.reason ?? '', /бюджет полного прохода/);
 });
 
-test('персистентность: sweepOffset переносится через serialize/restore', async () => {
+test('персистентность: прогресс полного прохода переносится через serialize/restore', async () => {
     const prober = new MockProber((n) => n === 5000);
     const scanner = new Scanner(prober);
     scanner.setServerTotals({ pictures: 5, videos: 0 });
@@ -114,14 +114,58 @@ test('персистентность: sweepOffset переносится чер�
     }
     assert.ok(state !== null);
     assert.ok(
-        state !== null && typeof state.sweepOffset === 'number' && state.sweepOffset > 0,
+        state!.sweep !== undefined &&
+            typeof state.sweep.gridOffset === 'number' &&
+            state.sweep.gridOffset > 0,
         'проход должен был продвинуться',
     );
+    assert.ok(Array.isArray(state!.sweep?.neterrRetry), 'очередь сетевых сбоев персистентится');
 
     const second = new Scanner(new MockProber(() => false));
     second.restore(state!);
     const meta = second.serializeMeta();
-    assert.equal(meta?.sweepOffset, state?.sweepOffset);
+    assert.deepEqual(meta?.sweep, state?.sweep);
+});
+
+test('старый state.json: одиночное sweepOffset читается как смещение сетки', () => {
+    const scanner = new Scanner(new MockProber(() => false));
+    const c = conn();
+    scanner.restore({
+        connection: c,
+        status: 'paused',
+        mode: 'delta',
+        probed: 10,
+        arms: [],
+        // Legacy-формат до двухфазного прохода: очередь плотного прохода называлась sweepQueue.
+        sweepOffset: 12345,
+    } as unknown as Parameters<Scanner['restore']>[0]);
+    const meta = scanner.serializeMeta();
+    assert.equal(meta?.sweep?.phase, 'grid');
+    assert.equal(meta?.sweep?.gridOffset, 12345);
+    assert.equal(meta?.sweep?.probesUsed, 0);
+});
+
+test('полный проход: файл вне класса вычетов якоря находится сплошным перебором', async () => {
+    // Файл 12777 = 5000 + 7777: 7777 не кратно 256 — сетка от якоря его не видит
+    // никогда (SPEC-1). После исчерпания сетки включается сплошной перебор (шаг 1)
+    // и находит его. MAX_NUMBER уменьшен, чтобы сетка быстро дошла до границ
+    // диапазона и передала эстафету перебору.
+    const far = 5000 + 7777;
+    const savedMax = C.MAX_NUMBER;
+    C.MAX_NUMBER = 5000 + 8192;
+    try {
+        const prober = new MockProber((n) => n === 5000 || n === far);
+        const scanner = new Scanner(prober);
+        scanner.setServerTotals({ pictures: 2, videos: 0 });
+        scanner.start(conn());
+        await waitStatus(scanner, ['done'], 120_000);
+
+        const p = scanner.progress();
+        assert.equal(p.found, 2, `должны быть найдены оба файла, реально: ${p.found}`);
+        assert.ok(prober.calls.includes(far), 'файл вне сетки якоря должен быть пробит');
+    } finally {
+        C.MAX_NUMBER = savedMax;
+    }
 });
 
 test('сетевые сбои: разовый сбой не теряет файл (повтор через очередь руки)', async () => {
@@ -143,7 +187,7 @@ test('разведка: пауза по серии сбоев → resume про�
 
         async probe(n: number): Promise<ProbeResult> {
             this.count += 1;
-            if (this.count <= 12) {
+            if (this.count <= C.NETERR_PAUSE) {
                 return { kind: 'neterr', media: null, contentType: null, size: null, detail: 'мок' };
             }
             if (n >= 5000 && n <= 5255) {

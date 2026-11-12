@@ -101,8 +101,10 @@ export interface Arm {
     hadJump: boolean;
     foundCount: number;
     foundSinceSweep: number;
-    /** Очередь номеров плотного прохода (sweep). */
-    sweepQueue: number[];
+    /** Очередь плотного прохода: 256 номеров вокруг находки (план, п.5.7). */
+    denseQueue: number[];
+    /** Номера с сетевыми сбоями — повтор пробы (отдельно от плотного прохода). */
+    retryQueue: number[];
     gapPos: number;
     gapMiss: number;
     /** Позиция, на которую вернуться после gapfill. */
