@@ -44,6 +44,8 @@ export interface HttpStreamOptions {
     headers?: Record<string, string>;
     /** Таймаут простоя: сбрасывается на каждый чанк (большие файлы качаются часами). */
     idleTimeoutMs: number;
+    /** Сигнал отмены: запрос и поток тела прерываются (обрыв всех клиентов превью). */
+    signal?: AbortSignal;
 }
 
 /** Транспорт мета-запросов (HEAD/GET без тела) — мокается в тестах probe. */
@@ -153,6 +155,12 @@ export const nodeTransport: HttpTransport = {
                 return;
             }
 
+            // Отмена ещё до старта: соединение даже не открывается.
+            if (options.signal?.aborted === true) {
+                reject(new NetworkError(`Запрос отменён: ${url}`));
+                return;
+            }
+
             const isHttps = parsed.protocol === 'https:';
             const mod = isHttps ? https : http;
 
@@ -204,6 +212,16 @@ export const nodeTransport: HttpTransport = {
                 if (timer !== undefined) clearTimeout(timer);
                 fail(err);
             });
+
+            // Отмена в любой момент: уничтожаем запрос — потребитель потока
+            // получит ошибку чтения тела.
+            options.signal?.addEventListener(
+                'abort',
+                () => {
+                    req.destroy(new NetworkError(`Запрос отменён: ${url}`));
+                },
+                { once: true },
+            );
 
             req.end();
         });

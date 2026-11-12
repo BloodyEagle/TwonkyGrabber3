@@ -30,6 +30,12 @@ export const CONFIG_GROUPS: readonly ConfigGroup[] = [
             { key: 'SPARSE_MAX', label: 'Макс. шаг sparse' },
             { key: 'SEARCH_STRIDE', label: 'Шаг блоков поиска', hint: '256 = сплошное покрытие; при 0 найдено в разведке' },
             { key: 'SEARCH_LIMIT_PROBES', label: 'Предел проб поиска', hint: 'на руку; страховка на «пустых» серверах' },
+            {
+                key: 'SWEEP_STRIDE',
+                label: 'Шаг полного прохода',
+                hint: 'догоняющая фаза при неполной статистике; 256 покрывает delta-библиотеки',
+            },
+            { key: 'SWEEP_MAX_PROBES', label: 'Предел проб полного прохода', hint: 'страховка на завышенной статистике' },
             { key: 'DENSE_SWEEP_EVERY', label: 'Плотный проход каждые N находок' },
             { key: 'MAX_NUMBER', label: 'Потолок номера' },
             { key: 'EPS_WINDOW_MS', label: 'Окно расчёта eps, мс' },
@@ -67,6 +73,8 @@ export const CONFIG_GROUPS: readonly ConfigGroup[] = [
             { key: 'THUMB_MIN', label: 'Мин. размер, px' },
             { key: 'THUMB_MAX', label: 'Макс. размер, px' },
             { key: 'THUMB_CACHE_MAX_AGE', label: 'Кэш браузера, с' },
+            { key: 'THUMB_CACHE_MAX_BYTES', label: 'Лимит дискового кэша, байт' },
+            { key: 'THUMB_NEG_CACHE_TTL', label: 'Кэш 404 превью, с', hint: 'видео и пропавшие файлы не перезапрашиваются' },
         ],
     },
     {

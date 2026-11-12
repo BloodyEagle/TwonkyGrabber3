@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import { DOWNLOAD_DIR, MAX_SESSIONS } from '../config';
 import { Downloader, createNodeDownloaderDeps } from './downloader';
 import { probeUrl } from './probe';
+import { fetchServerStats } from './server-stats';
 import { Scanner } from './scanner';
 import type { Prober } from './scanner';
 import { fileUrl } from './url-parser';
@@ -48,7 +49,7 @@ export class SessionManager {
     private readonly sessions = new Map<string, Session>();
     private readonly foundSinks: Array<(session: Session, files: FoundFile[]) => void> = [];
     private readonly changeSinks: Array<() => void> = [];
-    private readonly removeSinks: Array<(id: string) => void> = [];
+    private readonly removeSinks: Array<(id: string, session: Session) => void> = [];
     private nextId = 1;
 
     constructor(private readonly downloadRoot: string = DOWNLOAD_DIR) {}
@@ -90,8 +91,9 @@ export class SessionManager {
         this.changeSinks.push(sink);
     }
 
-    /** Подписка на удаление сессии (для очистки внешних данных, напр. found-<id>.jsonl). */
-    addOnRemove(sink: (id: string) => void): void {
+    /** Подписка на удаление сессии (для очистки внешних данных, напр.
+     *  found-<id>.jsonl и превью-кэша сессии). */
+    addOnRemove(sink: (id: string, session: Session) => void): void {
         this.removeSinks.push(sink);
     }
 
@@ -135,6 +137,12 @@ export class SessionManager {
         const scanner = new Scanner(prober);
         scannerRef = scanner;
         if (connection !== null) scanner.setConnection(connection);
+        // Повторная статистика при остановке рук без /rpc/info_status (бывает
+        // недоступен в момент подключения из-за сети).
+        scanner.setStatsFetcher(() => {
+            const conn = scannerRef?.getConnection() ?? null;
+            return conn === null ? Promise.resolve(null) : fetchServerStats(conn);
+        });
 
         const dir = opts.dir ?? sessionDir(connection);
         const downloader = new Downloader(createNodeDownloaderDeps(join(this.downloadRoot, dir)), scanner);
@@ -151,7 +159,8 @@ export class SessionManager {
         return session;
     }
 
-    /** Удаление сессии: скан останавливается, очередь очищается, файлы на диске остаются. */
+    /** Удаление сессии: скан останавливается, очередь очищается, файлы на диске
+     *  и записи превью-кэша удаляются. */
     remove(id: string): boolean {
         const session = this.sessions.get(id);
         if (session === undefined) return false;
@@ -160,7 +169,7 @@ export class SessionManager {
         session.downloader.dispose();
         this.sessions.delete(id);
         this.emitChange();
-        for (const sink of this.removeSinks) sink(id);
+        for (const sink of this.removeSinks) sink(id, session);
         return true;
     }
 

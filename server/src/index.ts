@@ -7,21 +7,25 @@ import express from 'express';
 import type { Request, Response, NextFunction } from 'express';
 import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { DOWNLOAD_DIR, PORT, STATIC_ROOT, STATE_FILE, C, applyConfigPatch } from './config';
+import { DOWNLOAD_DIR, PORT, STATIC_ROOT, STATE_FILE, THUMB_CACHE_DIR, C, applyConfigPatch } from './config';
 import { fetchServerStats } from './lib/server-stats';
 import { SessionManager } from './lib/sessions';
 import type { Session } from './lib/sessions';
 import { createApiRouter } from './lib/routes';
 import { logError } from './lib/log';
 import { FoundLog } from './lib/found-log';
+import { ThumbCache } from './lib/thumb-cache';
 import { Store } from './lib/store';
 import type { PersistedState } from './lib/store';
 
 const manager = new SessionManager(DOWNLOAD_DIR);
+// Дисковый кэш превью: переживает перезапуски, чистится по TTL и лимиту размера.
+const thumbCache = new ThumbCache(THUMB_CACHE_DIR);
+void thumbCache.prune();
 
 const app = express();
 app.use(express.json());
-app.use('/api', createApiRouter({ sessions: manager }));
+app.use('/api', createApiRouter({ sessions: manager, thumbCache }));
 
 /** Каталоги сборки фронта: dist, dist/browser или dist/<name>/browser (план, §9).
  *  Базу ищем на двух уровнях: ../client/dist (запуск из src через tsx) и
@@ -76,9 +80,12 @@ app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
 const store = new Store();
 // Находки — append-only JSONL (state.json остаётся маленьким, без O(n) перезаписи).
 const foundLog = new FoundLog(dirname(STATE_FILE));
-// Находки дописываются по мере поступления; лог чистится при закрытии вкладки.
+// Находки дописываются по мере поступления; лог и превью-кэш чистятся при закрытии вкладки.
 manager.addOnFound((session, files) => foundLog.append(session.id, files));
-manager.addOnRemove((id) => void foundLog.remove(id));
+manager.addOnRemove((id, session) => {
+    void foundLog.remove(id);
+    void thumbCache.purgePrefix(ThumbCache.sessionPrefix(session.dir));
+});
 
 /** Снимок состояния для записи в state.json (версия 2 — все сессии, без списка находок). */
 const snapshot = (): PersistedState => ({

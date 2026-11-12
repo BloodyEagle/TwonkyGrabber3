@@ -16,8 +16,10 @@ export function logError(context: string, message: string, err?: unknown): void 
 }
 
 /** Предупреждение (не фатальное, но требующее внимания). */
-export function logWarn(context: string, message: string): void {
-    console.warn(`[${timestamp()}] [warn] [${context}] ${message}`);
+export function logWarn(context: string, message: string, err?: unknown): void {
+    const detail =
+        err === undefined || err === null ? '' : ` — ${err instanceof Error ? err.message : String(err)}`;
+    console.warn(`[${timestamp()}] [warn] [${context}] ${message}${detail}`);
 }
 
 /** Информационное сообщение о значимом переходе состояния. */

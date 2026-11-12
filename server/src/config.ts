@@ -36,6 +36,14 @@ export const SPARSE_MAX = 10000;
 /** Шаг между блоками поиска при нулевой разведке (256 = сплошное покрытие). */
 export const SEARCH_STRIDE = 256;
 
+/** Шаг сетки «полного прохода» — догоняющей фазы при досрочной остановке рук.
+ *  Фаза «сетка» (якорь ± шаг) дёшево покрывает delta-библиотеки (файлы ≡ якорю
+ *  mod SWEEP_STRIDE) по всему диапазону; вслед за ней идёт сплошной перебор с
+ *  шагом 1 — остальные классы вычетов в пределах бюджета проб. */
+export const SWEEP_STRIDE = 256;
+/** Предел проб полного прохода: страховка на случай завышенной статистики сервера. */
+export const SWEEP_MAX_PROBES = 200_000;
+
 /** Предел проб поиска на руку (страховка от бесконечного перебора «пустого» сервера). */
 export const SEARCH_LIMIT_PROBES = 400_000;
 export const DENSE_SWEEP_EVERY = 2000;
@@ -60,10 +68,22 @@ export const NAME_SUFFIX_LIMIT = 100;
 export const THUMB_MIN = 16;
 export const THUMB_MAX = 2000;
 export const THUMB_CACHE_MAX_AGE = 86_400;
+/** Суммарный лимит дискового кэша превью, байт (LRU-обрезка по времени записи). */
+export const THUMB_CACHE_MAX_BYTES = 536_870_912;
+/** TTL негативного кэша превью (404), с: видео и пропавшие файлы не запрашиваются повторно. */
+export const THUMB_NEG_CACHE_TTL = 600;
+/** Порог накопленных байт записи, после которого запускается обрезка кэша. */
+export const THUMB_PRUNE_EVERY_BYTES = 33_554_432;
+/** Превью/оригиналы больше этого размера в дисковый кэш не пишутся (отдаются без кэша). */
+export const THUMB_CACHE_FILE_MAX_BYTES = 26_214_400;
 export const SAVE_EVERY_MS = 5000;
 
 /** Задержка между ретраями записи state.json (Windows: EPERM на rename). */
 export const SAVE_RETRY_DELAY_MS = 300;
+
+/** Ретраи rename при скачивании (Windows: EPERM при кратковременной блокировке файла). */
+export const RENAME_RETRIES = 3;
+export const RENAME_RETRY_DELAY_MS = 200;
 
 /** Максимум одновременно исследуемых серверов (сессий). Не редактируется в рантайме. */
 export const MAX_SESSIONS = 16;
@@ -97,6 +117,7 @@ export const PORT = envInt('PORT', 3000);
 export const DOWNLOAD_DIR = envStr('DOWNLOAD_DIR', './downloads');
 export const STATE_FILE = envStr('STATE_FILE', './data/state.json');
 export const STATIC_ROOT = envStr('STATIC_ROOT', '../client/dist');
+export const THUMB_CACHE_DIR = envStr('THUMB_CACHE_DIR', './data/thumb-cache');
 
 // --- Рантайм-конфигурация ---
 
@@ -116,6 +137,8 @@ export interface RuntimeConfig {
     SPARSE_MAX: number;
     SEARCH_STRIDE: number;
     SEARCH_LIMIT_PROBES: number;
+    SWEEP_STRIDE: number;
+    SWEEP_MAX_PROBES: number;
     DENSE_SWEEP_EVERY: number;
     MAX_NUMBER: number;
     EPS_WINDOW_MS: number;
@@ -139,6 +162,8 @@ export interface RuntimeConfig {
     THUMB_MIN: number;
     THUMB_MAX: number;
     THUMB_CACHE_MAX_AGE: number;
+    THUMB_CACHE_MAX_BYTES: number;
+    THUMB_NEG_CACHE_TTL: number;
     SAVE_EVERY_MS: number;
     SSE_SCAN_MS: number;
     SSE_FOUND_FLUSH_MS: number;
@@ -170,6 +195,8 @@ export const DEFAULT_CONFIG: RuntimeConfig = {
     SPARSE_MAX,
     SEARCH_STRIDE,
     SEARCH_LIMIT_PROBES,
+    SWEEP_STRIDE,
+    SWEEP_MAX_PROBES,
     DENSE_SWEEP_EVERY,
     MAX_NUMBER,
     EPS_WINDOW_MS,
@@ -193,6 +220,8 @@ export const DEFAULT_CONFIG: RuntimeConfig = {
     THUMB_MIN,
     THUMB_MAX,
     THUMB_CACHE_MAX_AGE,
+    THUMB_CACHE_MAX_BYTES,
+    THUMB_NEG_CACHE_TTL,
     SAVE_EVERY_MS,
     SSE_SCAN_MS,
     SSE_FOUND_FLUSH_MS,
@@ -217,10 +246,12 @@ export const C: RuntimeConfig = structuredClone(DEFAULT_CONFIG);
 const NUMBER_KEYS: readonly (keyof RuntimeConfig)[] = [
     'START_NUMBER', 'DETECT_BLOCK', 'SEQ_THRESHOLD', 'STEP_DELTA', 'MISS_LIMIT',
     'JUMP_POSITIONS', 'JUMP_REPEATS',     'SPARSE_PROBES', 'SPARSE_MIN', 'SPARSE_MAX', 'SEARCH_STRIDE', 'SEARCH_LIMIT_PROBES',
+    'SWEEP_STRIDE', 'SWEEP_MAX_PROBES',
     'DENSE_SWEEP_EVERY', 'MAX_NUMBER', 'EPS_WINDOW_MS', 'PROBE_CONCURRENCY', 'PROBE_BATCH',
     'PROBE_TIMEOUT', 'PROBE_RETRIES', 'NETERR_PAUSE', 'DL_START_THREADS', 'DL_MAX_THREADS',
     'DL_MIN_THREADS', 'DL_ADJUST_MS', 'DL_SPEED_UP', 'DL_SPEED_DOWN', 'DL_FAILS_THRESHOLD',
     'DL_RETRIES', 'NAME_SUFFIX_LIMIT', 'THUMB_MIN', 'THUMB_MAX', 'THUMB_CACHE_MAX_AGE',
+    'THUMB_CACHE_MAX_BYTES', 'THUMB_NEG_CACHE_TTL',
     'SAVE_EVERY_MS', 'SSE_SCAN_MS', 'SSE_FOUND_FLUSH_MS', 'SSE_QUEUE_MS', 'SSE_HEARTBEAT_MS',
     'FILES_PAGE_DEFAULT', 'FILES_PAGE_SIZE_DEFAULT', 'FILES_PAGE_SIZE_MAX',
     'QUEUE_PAGE_DEFAULT', 'QUEUE_PAGE_SIZE_DEFAULT', 'QUEUE_PAGE_SIZE_MAX',

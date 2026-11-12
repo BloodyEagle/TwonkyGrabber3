@@ -15,6 +15,11 @@ yarn-error.log*
 server/data/
 server/downloads/
 
+# Граф зависимостей token-economy-ts
+graph-deps.json
+.graph-deps-cache.json
+.kilo-edit-body.txt
+
 # IDE
 .idea/
 .DS_Store
