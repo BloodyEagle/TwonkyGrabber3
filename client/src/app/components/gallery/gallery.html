@@ -19,7 +19,7 @@
 } @else {
     <div class="grid" [style.grid-template-columns]="'repeat(auto-fill, minmax(' + cardWidth() + 'px, 1fr))'">
         @for (file of store.files(); track file.number) {
-            <app-file-card [file]="file" [thumb]="thumb()" />
+            <app-file-card [file]="file" [thumb]="thumb()" [attr.data-number]="file.number" />
         }
     </div>
 }

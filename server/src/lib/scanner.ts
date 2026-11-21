@@ -12,6 +12,7 @@ import { buildFileName } from './mime';
 import { fileUrl } from './url-parser';
 import { probePool } from './pool';
 import { logWarn } from './log';
+import { VisitedBitmap } from './visited-bitmap';
 import type { Arm, ArmDir, FoundFile, ScanMode, ScanProgress, ScanStatus, TwonkyConnection } from './types';
 import type { ProbeResult } from './probe';
 import type { ServerStats } from './server-stats';
@@ -135,9 +136,10 @@ export class Scanner {
     private status: ScanStatus = 'idle';
     private reason: string | null = null;
     private mode: ScanMode = null;
-    private probed = 0;
     private arms: Arm[] = [];
-    private readonly visited = new Set<number>();
+    /** Учёт проверенных номеров: персистентный битмап — переживает «Начать скан»
+     *  и рестарт сервера (дозапуск пробует только непроверенное; стирается reset'ом). */
+    private readonly visited = new VisitedBitmap();
     private readonly foundMap = new Map<number, FoundFile>();
     /** Инкрементные счётчики типов (чтобы progress() не итерировал весь foundMap). */
     private foundImagesCount = 0;
@@ -235,7 +237,7 @@ export class Scanner {
             reason: this.reason,
             mode: this.mode,
             connection: this.connection,
-            probed: this.probed,
+            probed: this.visited.count(),
             found: this.foundMap.size,
             foundImages,
             foundVideos,
@@ -336,7 +338,6 @@ export class Scanner {
         this.status = 'idle';
         this.reason = null;
         this.mode = null;
-        this.probed = 0;
         this.arms = [];
         this.lastDetectStart = null;
         this.visited.clear();
@@ -367,7 +368,7 @@ export class Scanner {
             connection: this.connection,
             status: this.status,
             mode: this.mode,
-            probed: this.probed,
+            probed: this.visited.count(),
             arms: this.arms.map((a) => ({ ...a, denseQueue: [...a.denseQueue], retryQueue: [...a.retryQueue] })),
             sweep: this.persistSweep(),
             found: this.foundList(),
@@ -381,7 +382,7 @@ export class Scanner {
             connection: this.connection,
             status: this.status,
             mode: this.mode,
-            probed: this.probed,
+            probed: this.visited.count(),
             arms: this.arms.map((a) => ({ ...a, denseQueue: [...a.denseQueue], retryQueue: [...a.retryQueue] })),
             sweep: this.persistSweep(),
         };
@@ -407,7 +408,6 @@ export class Scanner {
         this.reset();
         this.connection = state.connection;
         this.mode = state.mode;
-        this.probed = state.probed;
         this.arms = state.arms.map((a) => {
             // state.json прошлых версий: очередь плотного прохода называлась
             // sweepQueue, retryQueue отсутствовала.
@@ -427,8 +427,25 @@ export class Scanner {
         const wasRunning = state.status === 'scanning' || state.status === 'detecting';
         this.status = wasRunning ? 'paused' : state.status;
         this.reason = wasRunning ? 'Остановлено перезапуском сервера' : null;
-        // visited не сохраняется (план) — повторные пробы после рестарта допустимы.
+        // Учёт проверенных номеров (visited) персистентится отдельно — файл
+        // probed-<id>.bin загружается через loadVisited() после restore().
         return wasRunning;
+    }
+
+    /** Подгрузить персистентный учёт проверенных номеров (после restore).
+     *  false — файл отсутствует/повреждён (старые сессии): учёт остаётся пустым. */
+    loadVisited(data: Uint8Array): boolean {
+        return this.visited.load(data);
+    }
+
+    /** Учёт проверенных — на диск (автосейв/шатдаун); копия, не живой буфер. */
+    visitedBytes(): Uint8Array {
+        return this.visited.serialize();
+    }
+
+    /** Были ли изменения учёта с последней записи на диск. */
+    visitedDirty(): boolean {
+        return this.visited.isDirty();
     }
 
     /** Прогресс полного прохода из state.json; старый формат — одиночное смещение сетки. */
@@ -494,10 +511,10 @@ export class Scanner {
         this.status = 'detecting';
         this.reason = null;
         this.mode = null;
-        this.probed = 0;
+        // Учёт проверенных номеров НЕ стирается (персистентный битмап): дозапуск
+        // пробует только непроверенное; полный рескан — через reset() («Сбросить»).
         this.neterrStreak = 0;
         this.arms = [];
-        this.visited.clear();
         this.probeTimestamps = [];
         // Новый скан — новый бюджет полного прохода; фаза и смещения сохраняются,
         // чтобы продолжить обход диапазона с прошлого места (якорь пересчитается
@@ -535,12 +552,17 @@ export class Scanner {
                     this.visited.add(n);
                     items.push(n);
                 } else if (this.foundMap.has(n)) {
-                    // Уже найдено (например, в фазе поиска) — учитываем как якорь без пробы.
+                    // Уже найдено (в этом или прошлом запуске) — учитываем как якорь без пробы.
                     foundNumbers.push(n);
                 }
             }
+            if (items.length === 0) {
+                // Порция блока целиком проверена в прошлых запусках: проб нет,
+                // и это не сетевой сбой — считаем разведку в этой порции успешной.
+                anyResponse = true;
+                continue;
+            }
             const results = await Promise.all(items.map((n) => probePool.run(() => this.prober.probe(n))));
-            this.probed += items.length;
 
             const outcome = this.applyBatchResults(items, results, { markVisited: false }, gen);
             if (outcome === null) return; // reset/relaunch за время проб — результаты прошлой библиотеки
@@ -767,7 +789,6 @@ export class Scanner {
         const results = await Promise.all(
             batch.map((it) => probePool.run(() => this.prober.probe(it.number))),
         );
-        this.probed += batch.length;
 
         const outcome = this.applyBatchResults(
             batch.map((it) => it.number),
@@ -1146,9 +1167,8 @@ export class Scanner {
                     return;
                 }
 
-                const results = await Promise.all(items.map((n) => probePool.run(() => this.prober.probe(n))));
-                this.probed += items.length;
-                this.sweep.probesUsed += items.length;
+            const results = await Promise.all(items.map((n) => probePool.run(() => this.prober.probe(n))));
+            this.sweep.probesUsed += items.length;
 
                 const outcome = this.applyBatchResults(items, results, { markVisited: true }, gen);
                 if (outcome === null) return; // reset/relaunch за время проб
@@ -1198,7 +1218,6 @@ export class Scanner {
             }
             const batch = pending.slice(i, i + C.PROBE_BATCH);
             const results = await Promise.all(batch.map((n) => probePool.run(() => this.prober.probe(n))));
-            this.probed += batch.length;
             this.sweep.probesUsed += batch.length;
             const outcome = this.applyBatchResults(batch, results, { markVisited: true }, gen);
             if (outcome === null) return { kind: 'none' }; // reset/relaunch за время проб

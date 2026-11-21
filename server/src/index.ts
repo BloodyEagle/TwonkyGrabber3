@@ -14,6 +14,7 @@ import type { Session } from './lib/sessions';
 import { createApiRouter } from './lib/routes';
 import { logError } from './lib/log';
 import { FoundLog } from './lib/found-log';
+import { ProbedLog } from './lib/probed-log';
 import { ThumbCache } from './lib/thumb-cache';
 import { Store } from './lib/store';
 import type { PersistedState } from './lib/store';
@@ -80,10 +81,14 @@ app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
 const store = new Store();
 // Находки — append-only JSONL (state.json остаётся маленьким, без O(n) перезаписи).
 const foundLog = new FoundLog(dirname(STATE_FILE));
-// Находки дописываются по мере поступления; лог и превью-кэш чистятся при закрытии вкладки.
+// Учёт проверенных номеров — битмап probed-<id>.bin: «Начать скан» и рестарт
+// сервера продолжают с прошлого места, пробуя только непроверенные номера.
+const probedLog = new ProbedLog(dirname(STATE_FILE));
+// Находки дописываются по мере поступления; лог, учёт и превью-кэш чистятся при закрытии вкладки.
 manager.addOnFound((session, files) => foundLog.append(session.id, files));
 manager.addOnRemove((id, session) => {
     void foundLog.remove(id);
+    void probedLog.remove(id);
     void thumbCache.purgePrefix(ThumbCache.sessionPrefix(session.dir));
 });
 
@@ -133,8 +138,15 @@ void (async () => {
                     found = embeddedFound;
                 }
                 if (found.length > 0) session.scanner.restoreFound(found);
+                // Учёт проверенных номеров: дозапуск скана не повторяет старые пробы.
+                const probedBytes = await probedLog.load(saved.id);
+                const probedRestored =
+                    probedBytes !== null && session.scanner.loadVisited(probedBytes);
                 console.log(
-                    `[server] сессия ${saved.id} (${saved.dir}): найдено файлов — ${session.scanner.progress().found}`,
+                    `[server] сессия ${saved.id} (${saved.dir}): найдено файлов — ${session.scanner.progress().found}` +
+                        (probedRestored
+                            ? `, учёт проверенных восстановлен — ${session.scanner.progress().probed}`
+                            : ''),
                 );
                 const conn = session.scanner.getConnection();
                 if (conn !== null) {
@@ -162,6 +174,10 @@ void (async () => {
     }
     store.startAutoSave(() => {
         void foundLog.flush();
+        // Учёт проверенных — на диск только при изменениях (битмап ~1.25 МБ на сессию).
+        for (const s of manager.list()) {
+            if (s.scanner.visitedDirty()) void probedLog.save(s.id, s.scanner.visitedBytes());
+        }
         return snapshot();
     });
 
@@ -177,6 +193,9 @@ function shutdown(): void {
     for (const s of manager.list()) s.downloader.dispose();
     void (async () => {
         await foundLog.flush();
+        for (const s of manager.list()) {
+            if (s.scanner.visitedDirty()) await probedLog.save(s.id, s.scanner.visitedBytes());
+        }
         await store.saveNow(snapshot());
         process.exit(0);
     })();

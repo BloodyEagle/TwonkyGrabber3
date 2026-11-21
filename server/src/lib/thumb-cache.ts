@@ -57,9 +57,12 @@ export class ThumbCache {
     constructor(private readonly dir: string) {}
 
     /** Префикс ключей сессии: длина имени в ключе исключает коллизии префиксов
-     *  («host_80» является префиксом «host_8080») при очистке по закрытии сессии. */
+     *  («host_80» является префиксом «host_8080») при очистке по закрытию сессии.
+     *  Разделитель «-», а не «:»: на Windows двоеточие в имени файла создаёт
+     *  NTFS-поток (ADS) — rename внутри atomicWrite падал с EINVAL, и кэш
+     *  вообще не сохранялся (server/data/thumb-cache забивался файлами-обломками). */
     static sessionPrefix(dir: string): string {
-        return `${dir.length}:${dir}_`;
+        return `${dir.length}-${dir}_`;
     }
 
     /** Ключ записи: сессия (host_port), эпоха библиотеки, номер, размер ('WxH'|'orig'). */
@@ -129,11 +132,13 @@ export class ThumbCache {
     /**
      * Значение из кэша либо через загрузчик; одновременные вызовы одного ключа
      * дедуплицируются. loader получает сигнал отмены — он срабатывает, когда все
-     * клиенты ключа отвалились (см. cancelInflight).
+     * клиенты ключа отвалились (см. cancelInflight). persist — загрузка не
+     * отменяется при уходе клиентов: докачивается в кэш в фоне (оригиналы).
      */
     async getOrLoad(
         key: string,
         loader: (signal: AbortSignal) => Promise<ThumbLoadResult>,
+        opts: { persist?: boolean } = {},
     ): Promise<ThumbLoadResult> {
         const cached = await this.get(key).catch(() => null);
         if (cached !== null) return cached;
@@ -149,7 +154,10 @@ export class ThumbCache {
         })().finally(() => {
             this.inflight.delete(key);
         });
-        this.inflight.set(key, { promise, cancel: () => controller.abort() });
+        this.inflight.set(key, {
+            promise,
+            cancel: opts.persist === true ? null : () => controller.abort(),
+        });
         return promise;
     }
 

@@ -33,8 +33,16 @@ export class FilesService {
             const r = await this.api.files(sid, target, this.store.pageSize(), this.store.sort(), this.store.typeFilter());
             // Вкладка могла смениться (или пришёл новый запрос) — не затираем новое.
             if (seq !== this.loadSeq || this.store.activeSid() !== sid) return;
+            // Позиция могла устареть (файлы удалены/сброс скана) — уводим на последнюю страницу.
+            const last = Math.max(1, Math.ceil(r.total / Math.max(1, this.store.pageSize())));
+            if (target > last) {
+                await this.loadPage(last);
+                return;
+            }
             this.store.page.set(r.page);
             this.store.setFiles(r.items, r.total, true);
+            // Пережить перезагрузку страницы (F5): параметры и позиция — в localStorage.
+            this.store.persistActiveUi();
         } catch {
             /* сетевая ошибка — текущая страница остаётся как есть (SSE подхватит) */
         } finally {
@@ -57,6 +65,7 @@ export class FilesService {
     }
 
     async setPageSize(size: number): Promise<void> {
+        if (!Number.isFinite(size) || size <= 0) return; // мусорное значение не уходит в запрос
         // Сохраняем позицию: первый элемент текущей страницы должен остаться на экране.
         // Смещение первого элемента в отсортированном списке -> новая страница для нового size.
         const offset = (this.store.page() - 1) * this.store.pageSize();

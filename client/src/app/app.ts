@@ -1,4 +1,4 @@
-import { Component, effect, inject, signal } from '@angular/core';
+import { Component, DestroyRef, effect, inject, signal } from '@angular/core';
 import { ApiService } from './core/services/api';
 import { FilesService } from './core/services/files';
 import { SseService } from './core/services/sse';
@@ -23,6 +23,7 @@ export class App {
     private readonly sse = inject(SseService);
     private readonly files = inject(FilesService);
     private readonly store = inject(StateStore);
+    private readonly destroyRef = inject(DestroyRef);
     protected readonly toasts = inject(ToastService);
 
     protected readonly storeRef = this.store;
@@ -31,6 +32,12 @@ export class App {
     constructor() {
         // FilesService перезагружает галерею при смене активной вкладки (effect).
         void this.bootstrap();
+
+        // Клавиатурная навигация: Ctrl+←/→ — страница, Ctrl+↑/↓ — на 10 страниц,
+        // Ctrl+Alt+←/→ — вкладка (по кругу). document-уровень: работает при любом фокусе.
+        const onKeydown = (event: KeyboardEvent): void => this.handleKeydown(event);
+        document.addEventListener('keydown', onKeydown);
+        this.destroyRef.onDestroy(() => document.removeEventListener('keydown', onKeydown));
     }
 
     private async bootstrap(): Promise<void> {
@@ -67,5 +74,54 @@ export class App {
 
     protected openSettings(): void {
         this.store.settingsOpen.set(true);
+    }
+
+    // --- клавиатурная навигация (план: Ctrl+стрелки) ---
+
+    /** Ctrl+←/→ — страница назад/вперёд; Ctrl+↑/↓ — на 10 страниц;
+     *  Ctrl+Alt+←/→ — вкладка назад/вперёд (по кругу). */
+    private handleKeydown(event: KeyboardEvent): void {
+        if (!event.ctrlKey || event.shiftKey || event.metaKey) return;
+        const target = event.target;
+        if (
+            target instanceof HTMLElement &&
+            (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT' || target.isContentEditable)
+        ) {
+            return; // не мешаем навигации по тексту в полях ввода
+        }
+        let handled = true;
+        if (event.altKey) {
+            if (event.key === 'ArrowLeft') this.switchTab(-1);
+            else if (event.key === 'ArrowRight') this.switchTab(1);
+            else handled = false;
+        } else {
+            if (event.key === 'ArrowLeft') this.shiftPage(-1);
+            else if (event.key === 'ArrowRight') this.shiftPage(1);
+            else if (event.key === 'ArrowUp') this.shiftPage(10);
+            else if (event.key === 'ArrowDown') this.shiftPage(-10);
+            else handled = false;
+        }
+        if (handled) event.preventDefault();
+    }
+
+    /** Сдвиг страницы галереи с клампом к диапазону. */
+    private shiftPage(delta: number): void {
+        if (this.store.settingsOpen() || this.store.activeSid() === null) return;
+        const target = Math.min(this.store.totalPages(), Math.max(1, this.store.page() + delta));
+        if (target !== this.store.page()) void this.files.setPage(target);
+    }
+
+    /** Переключение вкладки по кругу (dir 1/-1); без активной — крайняя в направлении. */
+    private switchTab(dir: 1 | -1): void {
+        if (this.store.settingsOpen()) return;
+        const order = this.store.sessionOrder();
+        if (order.length === 0) return;
+        const active = this.store.activeSid();
+        const idx = active === null ? -1 : order.indexOf(active);
+        if (idx === -1) {
+            this.store.selectSession(dir === 1 ? order[0] : order[order.length - 1]);
+            return;
+        }
+        this.store.selectSession(order[(idx + dir + order.length) % order.length] ?? null);
     }
 }

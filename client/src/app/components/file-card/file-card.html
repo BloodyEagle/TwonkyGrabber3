@@ -1,11 +1,10 @@
 <div class="card" [class.selected]="selected()">
     <div class="img-zone" [style.aspect-ratio]="'5 / 4'">
         <a class="open-original" [href]="originalHref()" target="_blank" rel="noopener" title="Открыть оригинал (через прокси)"></a>
-        @if (!failed()) {
+        @if (!failed() && blobUrl() !== null) {
             <img
-                [src]="thumbSrc()"
+                [src]="blobUrl()"
                 [alt]="file().name"
-                loading="lazy"
                 (load)="onLoad($event)"
                 (error)="onError()"
                 [class.visible]="loaded()"

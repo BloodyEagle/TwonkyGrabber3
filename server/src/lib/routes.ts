@@ -16,6 +16,7 @@ import { C, applyConfigPatch, configSnapshot, MAX_SESSIONS, THUMB_CACHE_FILE_MAX
 import { checkAvailable } from './probe';
 import { fetchServerStats } from './server-stats';
 import { nodeTransport } from './http';
+import { Semaphore } from './pool';
 import { logError } from './log';
 import { fileUrl, parseConnectionUrl, thumbUrl } from './url-parser';
 import { ThumbCache } from './thumb-cache';
@@ -398,8 +399,23 @@ export function createApiRouter(deps: ApiDeps): Router {
         res.end(result.body);
     };
 
+    /** Очередь upstream-загрузок превью на сессию (THUMB_FETCH_CONCURRENCY): медленный
+     *  апстрим одной вкладки не монополизирует пул сокетов и память — другие вкладки,
+     *  пробы сканера и загрузки файлов не ждут за страницей оригиналов. */
+    const thumbLimiters = new Map<string, Semaphore>();
+    const limiterFor = (sid: string): Semaphore => {
+        let limiter = thumbLimiters.get(sid);
+        if (limiter === undefined) {
+            limiter = new Semaphore(C.THUMB_FETCH_CONCURRENCY);
+            thumbLimiters.set(sid, limiter);
+        }
+        return limiter;
+    };
+
     /** Клиенты in-flight загрузок превью по ключу кэша: когда последний клиент
-     *  ключа отвалился, апстрим-загрузка прерывается (plan §7, SPEC-3). */
+     *  ключа отвалился, апстрим-загрузка прерывается (plan §7, SPEC-3) — кроме
+     *  persist-загрузок (оригиналы докачиваются в кэш в фоне, «Начать показ
+     *  позже» получает файл уже из кэша). */
     const thumbWaiters = new Map<string, Set<Response>>();
     const trackThumbClient = (key: string, res: Response, onLastClose: () => void): void => {
         let clients = thumbWaiters.get(key);
@@ -477,14 +493,22 @@ export function createApiRouter(deps: ApiDeps): Router {
                 .catch((err: unknown) => failNeterr(err));
         };
 
-        /** Общая доставка: трекинг клиентов ключа, кэш/загрузка, oversize — потоком. */
-        const deliver = (key: string, loader: (signal: AbortSignal) => Promise<ThumbLoadResult>): void => {
+        /** Общая доставка: трекинг клиентов ключа, кэш/загрузка, oversize — потоком.
+         *  persist — не прерывать загрузку при уходе последнего клиента: оригиналы
+         *  докачиваются в кэш в фоне (очередь сессии продолжает дренаж). */
+        const deliver = (
+            key: string,
+            loader: (signal: AbortSignal) => Promise<ThumbLoadResult>,
+            persist = false,
+        ): void => {
             res.on('close', () => {
                 clientGone = true;
             });
-            trackThumbClient(key, res, () => deps.thumbCache.cancelInflight(key));
+            trackThumbClient(key, res, () => {
+                if (!persist) deps.thumbCache.cancelInflight(key);
+            });
             void deps.thumbCache
-                .getOrLoad(key, loader)
+                .getOrLoad(key, loader, { persist })
                 .then((result) => {
                     if (clientGone) return; // клиент отвалился, пока грузили
                     if (result.type === 'toolarge') {
@@ -498,10 +522,22 @@ export function createApiRouter(deps: ApiDeps): Router {
         };
 
         if (queryToString(req.query.orig) === '1') {
-            // Принудительно оригинал (открытие полного изображения);
-            // не-картинка (видео) → негативный кэш и заглушка на фронте.
-            deliver(ThumbCache.key(session.dir, epoch, n, 'orig'), (signal) =>
-                fetchImage(fileUrl(conn, n), signal),
+            // Принудительно оригинал (открытие полного изображения / режим
+            // «Показывать оригиналы»); не-картинка (видео) → негативный кэш.
+            // persist: уход клиента не прерывает загрузку — оригинал докачивается
+            // в кэш в фоне (очередь сессии дренажится независимо от просмотров).
+            deliver(
+                ThumbCache.key(session.dir, epoch, n, 'orig'),
+                (signal) =>
+                    limiterFor(session.id).run(async () => {
+                        const result = await fetchImage(fileUrl(conn, n), signal);
+                        // Эпоха сменилась за время докачки — контент прошлой библиотеки не кэшируем.
+                        if (result.type === 'content' && session.scanner.epoch() !== epoch) {
+                            return { ...result, cache: false };
+                        }
+                        return result;
+                    }),
+                true,
             );
             return;
         }
@@ -515,13 +551,24 @@ export function createApiRouter(deps: ApiDeps): Router {
         const clamp = (v: number): number => Math.min(C.THUMB_MAX, Math.max(C.THUMB_MIN, Math.round(v)));
         const size = `${clamp(w)}x${clamp(h)}`;
 
-        deliver(ThumbCache.key(session.dir, epoch, n, size), async (signal) => {
-            // Масштабированное превью; если его нет/он недоступен/он oversize —
-            // фолбэк на оригинал (видео уйдёт в негативный кэш, oversize — в поток).
-            const scaled = await fetchImage(thumbUrl(conn, n, clamp(w), clamp(h)), signal);
-            if (scaled.type === 'content') return scaled;
-            return fetchImage(fileUrl(conn, n), signal);
-        });
+        deliver(
+            ThumbCache.key(session.dir, epoch, n, size),
+            (signal) =>
+                limiterFor(session.id).run(async () => {
+                    // Масштабированное превью; если его нет/он недоступен/он oversize —
+                    // фолбэк на оригинал. Видео фолбэка не получает: оригинал — гигабайты,
+                    // streamOriginal тянул бы целый файл в <img> (вешание страницы на минуты).
+                    // Сразу негатив — браузер показывает заглушку «видео», негатив кэшируется.
+                    const scaled = await fetchImage(thumbUrl(conn, n, clamp(w), clamp(h)), signal);
+                    if (scaled.type === 'content') return scaled;
+                    if (session.scanner.getFound(n)?.kind === 'video') return { type: 'negative' };
+                    const fallback = await fetchImage(fileUrl(conn, n), signal);
+                    if (fallback.type === 'content' && session.scanner.epoch() !== epoch) {
+                        return { ...fallback, cache: false };
+                    }
+                    return fallback;
+                }),
+        );
     });
 
     // --- Очередь скачивания (план, п.8) ---

@@ -101,6 +101,20 @@
     accent-color: var(--accent);
 }
 
+.check-orig {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-dim);
+    font-size: 12px;
+    white-space: nowrap;
+    cursor: pointer;
+}
+
+.check-orig input {
+    accent-color: var(--accent);
+}
+
 .hint {
     margin: 6px 2px 0;
     color: var(--text-mute);

@@ -2,7 +2,7 @@ import { Component, computed, inject } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { ApiService } from '../../core/services/api';
 import { FilesService } from '../../core/services/files';
-import { StateStore, THUMB_SIZES } from '../../core/services/state-store';
+import { StateStore, THUMB_SIZES, PAGE_SIZE_OPTIONS } from '../../core/services/state-store';
 import { ToastService } from '../../core/services/toast';
 import { formatNumber } from '../../core/format';
 
@@ -49,7 +49,7 @@ export class GalleryToolbar {
     protected readonly thumbSizes = this.store.thumbSizes;
     protected readonly sizeKeys = Object.keys(THUMB_SIZES) as (keyof typeof THUMB_SIZES)[];
 
-    protected readonly sizeOptions = [30, 60, 120];
+    protected readonly sizeOptions = PAGE_SIZE_OPTIONS;
 
     /** compareWith для ngModel-селекта числовых опций. */
     protected equalAsNumber(a: unknown, b: unknown): boolean {
@@ -75,6 +75,13 @@ export class GalleryToolbar {
 
     protected setThumbSize(key: keyof typeof THUMB_SIZES): void {
         this.store.thumbSize.set(key);
+        this.store.persistActiveUi();
+    }
+
+    /** «Показывать оригиналы» — режим per-tab, сохраняется вместе с остальными параметрами. */
+    protected setShowOriginals(value: boolean): void {
+        this.store.showOriginals.set(value);
+        this.store.persistActiveUi();
     }
 
     protected toggleAll(event: Event): void {

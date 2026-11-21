@@ -14,6 +14,8 @@ export const THUMB_SIZES: Readonly<Record<ThumbSizeKey, { w: number; h: number; 
 };
 
 export const PAGE_SIZE_DEFAULT = 60;
+/** Варианты «на странице» (тулбар + валидация восстановленных значений). */
+export const PAGE_SIZE_OPTIONS: readonly number[] = [30, 60, 120];
 
 /** Нейтральный прогресс скана (до первого снимка). */
 const DEFAULT_SCAN: ScanProgress = {
@@ -49,6 +51,10 @@ interface GalleryUiState {
     typeFilter: TypeFilter;
     thumbSize: ThumbSizeKey;
     selection: ReadonlySet<number>;
+    /** Номер первого видимого файла — привязка позиции к файлу, а не к смещению. */
+    anchor: number | null;
+    /** Режим «Показывать оригиналы» (per-tab). */
+    showOriginals: boolean;
 }
 
 /**
@@ -82,6 +88,13 @@ export class StateStore {
     readonly sort = signal<SortDir>('asc');
     readonly typeFilter = signal<TypeFilter>('all');
     readonly thumbSize = signal<ThumbSizeKey>('S');
+    /** Номер первого видимого файла текущей страницы (обновляют setFiles и Gallery). */
+    readonly pageAnchor = signal<number | null>(null);
+    /** Позиция для восстановления: Gallery проскроллит к карточке и сбросит сигнал. */
+    readonly pendingAnchor = signal<number | null>(null);
+    /** «Показывать оригиналы»: фото тянут оригинал вместо превью (сервер отдаёт
+     *  одинаковую заглушку на scale-запросы больших файлов). */
+    readonly showOriginals = signal(false);
     readonly filesLoading = signal(false);
     /** Новые находки с последнего обновления страницы (плашка «Появились новые файлы»). */
     readonly newFound = signal(0);
@@ -165,7 +178,10 @@ export class StateStore {
         });
         // Чистим кэш UI удалённых (на стороне сервера) сессий.
         for (const sid of [...this.uiCache.keys()]) {
-            if (!order.includes(sid)) this.uiCache.delete(sid);
+            if (!order.includes(sid)) {
+                this.uiCache.delete(sid);
+                this.clearPersisted(sid);
+            }
         }
         const active = this.activeSid();
         if (active !== null && !order.includes(active)) {
@@ -186,6 +202,7 @@ export class StateStore {
     /** Локальное удаление вкладки после DELETE /api/sessions/:id. */
     removeSession(id: string): void {
         this.uiCache.delete(id);
+        this.clearPersisted(id);
         this.sessionTabs.update((prev) => {
             const next = new Map(prev);
             next.delete(id);
@@ -212,31 +229,163 @@ export class StateStore {
         this.resetActiveData();
     }
 
-    /** Сохранить UI-состояние галереи сессии в кэш. */
-    private saveUiState(sid: string): void {
-        this.uiCache.set(sid, {
+    /** Снимок текущего UI-состояния галереи. */
+    private snapshotUi(): GalleryUiState {
+        return {
             page: this.page(),
             pageSize: this.pageSize(),
             sort: this.sort(),
             typeFilter: this.typeFilter(),
             thumbSize: this.thumbSize(),
             selection: this.selection(),
-        });
+            anchor: this.pageAnchor(),
+            showOriginals: this.showOriginals(),
+        };
     }
 
-    /** Восстановить UI-состояние галереи сессии (или дефолты для новой сессии). */
+    /** Сохранить UI-состояние галереи сессии в кэш и localStorage. */
+    private saveUiState(sid: string): void {
+        this.uiCache.set(sid, this.snapshotUi());
+        this.writePersisted(sid);
+    }
+
+    /** Сохранить UI активной вкладки (после смены фильтров/страницы, без переключения). */
+    persistActiveUi(): void {
+        const sid = this.activeSid();
+        if (sid === null) return;
+        this.uiCache.set(sid, this.snapshotUi());
+        this.writePersisted(sid);
+    }
+
+    /** Восстановить UI-состояние галереи сессии: кэш → localStorage → дефолты. */
     private loadUiState(sid: string | null): void {
-        const cached = sid === null ? undefined : this.uiCache.get(sid);
+        if (sid === null) {
+            this.applyUiDefaults();
+            return;
+        }
+        const cached = this.uiCache.get(sid);
         if (cached !== undefined) {
             this.page.set(cached.page);
             this.pageSize.set(cached.pageSize);
             this.sort.set(cached.sort);
             this.typeFilter.set(cached.typeFilter);
             this.thumbSize.set(cached.thumbSize);
+            this.showOriginals.set(cached.showOriginals);
             this.selection.set(new Set(cached.selection));
-        } else {
-            this.page.set(1);
+            this.pageAnchor.set(cached.anchor);
+            this.pendingAnchor.set(cached.anchor);
+            return;
+        }
+        const persisted = this.readPersisted(this.sessionDir(sid) ?? sid);
+        if (persisted !== null) {
+            const r = this.clampRestored(persisted);
+            this.page.set(r.page);
+            this.pageSize.set(r.pageSize);
+            this.sort.set(r.sort);
+            this.typeFilter.set(r.typeFilter);
+            this.thumbSize.set(r.thumbSize);
+            this.showOriginals.set(r.showOriginals);
             this.clearSelection();
+            this.pageAnchor.set(r.anchor);
+            this.pendingAnchor.set(r.anchor);
+            return;
+        }
+        this.applyUiDefaults();
+    }
+
+    /** Дефолты для новой сессии (без утечки фильтров соседней вкладки). */
+    private applyUiDefaults(): void {
+        this.page.set(1);
+        this.pageSize.set(PAGE_SIZE_DEFAULT);
+        this.sort.set('asc');
+        this.typeFilter.set('all');
+        this.thumbSize.set('S');
+        this.showOriginals.set(false);
+        this.clearSelection();
+        this.pageAnchor.set(null);
+        this.pendingAnchor.set(null);
+    }
+
+    /** Каталог загрузок сессии — стабильный ключ хранения между перезапусками сервера. */
+    private sessionDir(sid: string): string | null {
+        return this.sessionTabs().get(sid)?.dir ?? null;
+    }
+
+    private static readonly UI_STORAGE_PREFIX = 'tg.gallery.';
+
+    /** Сохранённое в localStorage UI-состояние сессии (по каталогу загрузок). */
+    private writePersisted(sid: string): void {
+        const dir = this.sessionDir(sid);
+        const state = this.uiCache.get(sid);
+        if (dir === null || state === undefined) return;
+        try {
+            const data = {
+                v: 1,
+                page: state.page,
+                pageSize: state.pageSize,
+                sort: state.sort,
+                type: state.typeFilter,
+                thumb: state.thumbSize,
+                anchor: state.anchor,
+                orig: state.showOriginals,
+            };
+            localStorage.setItem(StateStore.UI_STORAGE_PREFIX + dir, JSON.stringify(data));
+        } catch {
+            /* приватный режим или переполнение квоты — не критично */
+        }
+    }
+
+    private readPersisted(dir: string): Omit<GalleryUiState, 'selection'> | null {
+        try {
+            const raw = localStorage.getItem(StateStore.UI_STORAGE_PREFIX + dir);
+            if (raw === null) return null;
+            const d = JSON.parse(raw) as {
+                page?: unknown;
+                pageSize?: unknown;
+                sort?: unknown;
+                type?: unknown;
+                thumb?: unknown;
+                anchor?: unknown;
+                orig?: unknown;
+            };
+            return {
+                page: typeof d.page === 'number' ? d.page : 1,
+                pageSize: typeof d.pageSize === 'number' ? d.pageSize : PAGE_SIZE_DEFAULT,
+                sort: d.sort === 'desc' ? 'desc' : 'asc',
+                typeFilter: d.type === 'image' || d.type === 'video' ? d.type : 'all',
+                thumbSize: typeof d.thumb === 'string' && d.thumb !== '' ? (d.thumb as ThumbSizeKey) : 'S',
+                anchor: typeof d.anchor === 'number' && Number.isFinite(d.anchor) ? d.anchor : null,
+                showOriginals: d.orig === true,
+            };
+        } catch {
+            return null;
+        }
+    }
+
+    /** Валидация восстановленного значения: мусор в localStorage не ломает галерею. */
+    private clampRestored(r: Omit<GalleryUiState, 'selection'>): Omit<GalleryUiState, 'selection'> {
+        const allowedThumb = new Set([
+            ...Object.keys(THUMB_SIZES),
+            ...Object.keys(this.serverConfig()?.values.THUMB_SIZES ?? {}),
+        ]);
+        return {
+            page: Number.isInteger(r.page) && r.page >= 1 ? r.page : 1,
+            pageSize: PAGE_SIZE_OPTIONS.includes(r.pageSize) ? r.pageSize : PAGE_SIZE_DEFAULT,
+            sort: r.sort,
+            typeFilter: r.typeFilter,
+            thumbSize: allowedThumb.has(r.thumbSize) ? r.thumbSize : 'S',
+            anchor: r.anchor !== null && Number.isFinite(r.anchor) ? r.anchor : null,
+            showOriginals: r.showOriginals === true,
+        };
+    }
+
+    /** Удалить сохранённое UI-состояние закрытой сессии. */
+    private clearPersisted(sid: string): void {
+        const dir = this.sessionDir(sid) ?? sid;
+        try {
+            localStorage.removeItem(StateStore.UI_STORAGE_PREFIX + dir);
+        } catch {
+            /* localStorage недоступен — не критично */
         }
     }
 
@@ -300,6 +449,7 @@ export class StateStore {
     setFiles(items: FoundFile[], total: number, resetNew: boolean): void {
         this.files.set(items);
         this.filesTotal.set(total);
+        this.pageAnchor.set(items.length > 0 ? (items[0]?.number ?? null) : null);
         if (resetNew) this.newFound.set(0);
     }
 

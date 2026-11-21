@@ -24,7 +24,7 @@
         </select>
         <button class="btn btn-sm btn-secondary" type="button" (click)="goToPage(storeRef.page() - 10)" [disabled]="storeRef.page() <= 10" aria-label="На 10 страниц назад" title="На 10 страниц назад">‹‹</button>
         <button class="btn btn-sm btn-secondary" type="button" (click)="goToPage(storeRef.page() - 1)" [disabled]="storeRef.page() <= 1" aria-label="Предыдущая страница">‹</button>
-        @for (p of pages(); track p) {
+        @for (p of pages(); track $index) {
             @if (p === 0) {
                 <span class="dots">…</span>
             } @else {
@@ -72,6 +72,11 @@
         </div>
     </div>
 
+    <label class="check-orig" title="Загружать оригиналы фото вместо превью — когда сервер не отдаёт превью и возвращает одинаковую заглушку (оригиналы кэшируются на диске сервера)">
+        <input type="checkbox" [ngModel]="storeRef.showOriginals()" (ngModelChange)="setShowOriginals($event)" />
+        Показывать оригиналы
+    </label>
+
     <label class="check-all">
         <input type="checkbox" [checked]="allOnPageSelected()" (change)="toggleAll($event)" />
         выбрать все на странице
@@ -82,4 +87,4 @@
     </button>
     <button class="btn btn-secondary" type="button" (click)="enqueueAll()">Скачать всё</button>
 </div>
-<p class="hint">Клик по превью открывает оригинал; чекбокс выбирает файл, Shift+клик — диапазон в пределах страницы.</p>
+<p class="hint">Клик по превью открывает оригинал; чекбокс выбирает файл, Shift+клик — диапазон в пределах страницы. Клавиатура: Ctrl+←/→ — страница, Ctrl+↑/↓ — на 10 страниц, Ctrl+Alt+←/→ — вкладка.</p>

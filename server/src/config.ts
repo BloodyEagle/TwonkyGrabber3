@@ -76,6 +76,10 @@ export const THUMB_NEG_CACHE_TTL = 600;
 export const THUMB_PRUNE_EVERY_BYTES = 33_554_432;
 /** Превью/оригиналы больше этого размера в дисковый кэш не пишутся (отдаются без кэша). */
 export const THUMB_CACHE_FILE_MAX_BYTES = 26_214_400;
+/** Параллельные upstream-загрузки превью НА СЕССИЮ (очередь): медленный апстрим
+ *  одной вкладки не монополизирует пул сокетов и память — остальные вкладки,
+ *  пробы сканера и загрузки не ждут за страницей оригиналов. */
+export const THUMB_FETCH_CONCURRENCY = 4;
 export const SAVE_EVERY_MS = 5000;
 
 /** Задержка между ретраями записи state.json (Windows: EPERM на rename). */
@@ -164,6 +168,7 @@ export interface RuntimeConfig {
     THUMB_CACHE_MAX_AGE: number;
     THUMB_CACHE_MAX_BYTES: number;
     THUMB_NEG_CACHE_TTL: number;
+    THUMB_FETCH_CONCURRENCY: number;
     SAVE_EVERY_MS: number;
     SSE_SCAN_MS: number;
     SSE_FOUND_FLUSH_MS: number;
@@ -222,6 +227,7 @@ export const DEFAULT_CONFIG: RuntimeConfig = {
     THUMB_CACHE_MAX_AGE,
     THUMB_CACHE_MAX_BYTES,
     THUMB_NEG_CACHE_TTL,
+    THUMB_FETCH_CONCURRENCY,
     SAVE_EVERY_MS,
     SSE_SCAN_MS,
     SSE_FOUND_FLUSH_MS,
@@ -251,7 +257,7 @@ const NUMBER_KEYS: readonly (keyof RuntimeConfig)[] = [
     'PROBE_TIMEOUT', 'PROBE_RETRIES', 'NETERR_PAUSE', 'DL_START_THREADS', 'DL_MAX_THREADS',
     'DL_MIN_THREADS', 'DL_ADJUST_MS', 'DL_SPEED_UP', 'DL_SPEED_DOWN', 'DL_FAILS_THRESHOLD',
     'DL_RETRIES', 'NAME_SUFFIX_LIMIT', 'THUMB_MIN', 'THUMB_MAX', 'THUMB_CACHE_MAX_AGE',
-    'THUMB_CACHE_MAX_BYTES', 'THUMB_NEG_CACHE_TTL',
+    'THUMB_CACHE_MAX_BYTES', 'THUMB_NEG_CACHE_TTL', 'THUMB_FETCH_CONCURRENCY',
     'SAVE_EVERY_MS', 'SSE_SCAN_MS', 'SSE_FOUND_FLUSH_MS', 'SSE_QUEUE_MS', 'SSE_HEARTBEAT_MS',
     'FILES_PAGE_DEFAULT', 'FILES_PAGE_SIZE_DEFAULT', 'FILES_PAGE_SIZE_MAX',
     'QUEUE_PAGE_DEFAULT', 'QUEUE_PAGE_SIZE_DEFAULT', 'QUEUE_PAGE_SIZE_MAX',
